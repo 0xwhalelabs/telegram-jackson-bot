@@ -586,31 +586,24 @@ async def send_leaderboard(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
 
-async def main() -> None:
+def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
-
+ 
     application = Application.builder().token(token).build()
-
+ 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
+ 
     from zoneinfo import ZoneInfo
-
+ 
     kst = ZoneInfo(KST_TZ)
     application.job_queue.run_daily(send_fever_start, time=time(19, 0, tzinfo=kst))
     application.job_queue.run_daily(send_fever_end, time=time(23, 0, tzinfo=kst))
     application.job_queue.run_repeating(send_leaderboard, interval=3 * 60 * 60, first=10)
-
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-
-    await application.updater.idle()
-
-    await application.stop()
-    await application.shutdown()
+ 
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
