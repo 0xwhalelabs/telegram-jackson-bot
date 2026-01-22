@@ -708,7 +708,10 @@ def main() -> None:
     kst = ZoneInfo(KST_TZ)
     application.job_queue.run_daily(send_fever_start, time=time(19, 0, tzinfo=kst))
     application.job_queue.run_daily(send_fever_end, time=time(23, 0, tzinfo=kst))
-    application.job_queue.run_repeating(send_leaderboard, interval=3 * 60 * 60, first=10)
+    application.job_queue.run_daily(send_leaderboard, time=time(10, 0, tzinfo=kst))
+    application.job_queue.run_daily(send_leaderboard, time=time(14, 0, tzinfo=kst))
+    application.job_queue.run_daily(send_leaderboard, time=time(18, 0, tzinfo=kst))
+    application.job_queue.run_daily(send_leaderboard, time=time(22, 0, tzinfo=kst))
  
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
