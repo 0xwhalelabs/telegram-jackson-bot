@@ -133,50 +133,42 @@ async def handle_exp_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     uref = user_ref(db, chat_id, user_id)
 
-    def txn_fn(txn: firestore.Transaction) -> Dict[str, Any]:
-        snap = uref.get(transaction=txn)
-        data = snap.to_dict() if snap.exists else {}
+    snap = uref.get()
+    data = snap.to_dict() if snap.exists else {}
 
-        qts: List[Dict[str, Any]] = list(data.get("exp_query_timestamps", []))
-        cutoff = dt - timedelta(hours=24)
-        qts = [x for x in qts if x.get("ts") and x["ts"] >= cutoff]
+    qts: List[Dict[str, Any]] = list(data.get("exp_query_timestamps", []))
+    cutoff = dt - timedelta(hours=24)
+    qts = [x for x in qts if x.get("ts") and x["ts"] >= cutoff]
 
-        if len(qts) >= 3:
-            return {
-                "ok": False,
-                "msg": "24시간 내 !EXP 조회 횟수 제한(3회)에 도달했습니다.",
-            }
+    if len(qts) >= 3:
+        await update.message.reply_text("24시간 내 !EXP 조회 횟수 제한(3회)에 도달했습니다.")
+        return
 
-        qts.append({"ts": dt})
+    qts.append({"ts": dt})
+    uref.set(
+        {
+            "user_id": user_id,
+            "username": username or None,
+            "display": display,
+            "exp_query_timestamps": qts,
+            "last_seen": dt,
+        },
+        merge=True,
+    )
 
-        txn.set(
-            uref,
-            {
-                "user_id": user_id,
-                "username": username or None,
-                "display": display,
-                "exp_query_timestamps": qts,
-                "last_seen": dt,
-            },
-            merge=True,
-        )
+    total_exp = int(data.get("total_exp", 0))
+    level, progress, need = compute_level(total_exp)
+    remaining = need - progress
 
-        total_exp = int(data.get("total_exp", 0))
-        level, progress, need = compute_level(total_exp)
-        remaining = need - progress
-
-        return {
-            "ok": True,
-            "level": level,
-            "total_exp": total_exp,
-            "remaining": remaining,
-            "need": need,
-            "progress": progress,
-            "date": date_key,
-        }
-
-    txn = db.transaction()
-    result = txn_fn(txn)
+    result = {
+        "ok": True,
+        "level": level,
+        "total_exp": total_exp,
+        "remaining": remaining,
+        "need": need,
+        "progress": progress,
+        "date": date_key,
+    }
 
     if not result.get("ok"):
         await update.message.reply_text(result["msg"])
@@ -259,168 +251,83 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     contains_url = URL_PATTERN.search(text) is not None
 
-    txn = db.transaction()
+    chat_snap = cref.get()
+    user_snap = uref.get()
 
-    def txn_fn(txn: firestore.Transaction) -> Dict[str, Any]:
-        chat_snap = cref.get(transaction=txn)
-        user_snap = uref.get(transaction=txn)
+    cdata = chat_snap.to_dict() if chat_snap.exists else {}
+    udata = user_snap.to_dict() if user_snap.exists else {}
 
-        cdata = chat_snap.to_dict() if chat_snap.exists else {}
-        udata = user_snap.to_dict() if user_snap.exists else {}
+    mute_until = udata.get("mute_until")
+    if mute_until and mute_until > dt:
+        return
 
-        mute_until = udata.get("mute_until")
-        if mute_until and mute_until > dt:
-            return {"action": "muted"}
+    warn_reset_at = udata.get("warn_reset_at")
+    warn_count = int(udata.get("warn_count", 0))
+    if not warn_reset_at or warn_reset_at <= dt:
+        warn_count = 0
+        warn_reset_at = dt + timedelta(hours=24)
 
-        warn_reset_at = udata.get("warn_reset_at")
-        warn_count = int(udata.get("warn_count", 0))
-        if not warn_reset_at or warn_reset_at <= dt:
+    mute_tier_date = udata.get("mute_tier_date")
+    mute_tier_today = int(udata.get("mute_tier_today", 0))
+    if mute_tier_date != today:
+        mute_tier_today = 0
+        mute_tier_date = today
+
+    last_messages: List[Dict[str, Any]] = list(udata.get("last_messages", []))
+    last_messages = [
+        m for m in last_messages if m.get("ts") and m["ts"] >= dt - timedelta(minutes=2)
+    ]
+
+    is_repeat = False
+    for m in last_messages:
+        prev_norm = m.get("norm") or ""
+        if prev_norm == norm:
+            is_repeat = True
+            break
+        if prev_norm and similarity(prev_norm, norm) >= 0.9:
+            is_repeat = True
+            break
+
+    if contains_url or is_repeat:
+        warn_count += 1
+        warn_reset_at = dt + timedelta(hours=24)
+
+        mute_info: Optional[Dict[str, Any]] = None
+        if warn_count >= 3:
+            minutes = next_mute_minutes(mute_tier_today)
+            mute_tier_today += 1
             warn_count = 0
-            warn_reset_at = dt + timedelta(hours=24)
-
-        mute_tier_date = udata.get("mute_tier_date")
-        mute_tier_today = int(udata.get("mute_tier_today", 0))
-        if mute_tier_date != today:
-            mute_tier_today = 0
-            mute_tier_date = today
-
-        last_messages: List[Dict[str, Any]] = list(udata.get("last_messages", []))
-        last_messages = [
-            m
-            for m in last_messages
-            if m.get("ts") and m["ts"] >= dt - timedelta(minutes=2)
-        ]
-
-        is_repeat = False
-        for m in last_messages:
-            prev_norm = m.get("norm") or ""
-            if prev_norm == norm:
-                is_repeat = True
-                break
-            if prev_norm and similarity(prev_norm, norm) >= 0.9:
-                is_repeat = True
-                break
-
-        if contains_url or is_repeat:
-            warn_count += 1
-            warn_reset_at = dt + timedelta(hours=24)
-
-            mute_info: Optional[Dict[str, Any]] = None
-            if warn_count >= 3:
-                minutes = next_mute_minutes(mute_tier_today)
-                mute_tier_today += 1
-                warn_count = 0
-                mute_until_new = dt + timedelta(minutes=minutes)
-                mute_info = {"minutes": minutes, "until": mute_until_new}
-                txn.set(
-                    uref,
-                    {
-                        "mute_until": mute_until_new,
-                        "mute_tier_today": mute_tier_today,
-                        "mute_tier_date": mute_tier_date,
-                    },
-                    merge=True,
-                )
-
-            txn.set(
-                uref,
+            mute_until_new = dt + timedelta(minutes=minutes)
+            mute_info = {"minutes": minutes, "until": mute_until_new}
+            uref.set(
                 {
-                    "user_id": user_id,
-                    "username": username or None,
-                    "display": display,
-                    "warn_count": warn_count,
-                    "warn_reset_at": warn_reset_at,
+                    "mute_until": mute_until_new,
                     "mute_tier_today": mute_tier_today,
                     "mute_tier_date": mute_tier_date,
-                    "last_seen": dt,
-                    "last_active_date": today,
                 },
                 merge=True,
             )
 
-            last_messages.append({"raw": text, "norm": norm, "ts": dt})
-            last_messages = sorted(last_messages, key=lambda x: x["ts"])[-8:]
-            txn.set(uref, {"last_messages": last_messages}, merge=True)
-
-            txn.set(
-                cref,
-                {
-                    "chat_id": chat_id,
-                    "title": chat_title,
-                    "last_seen": dt,
-                },
-                merge=True,
-            )
-
-            return {
-                "action": "blocked",
-                "blocked_reason": "url" if contains_url else "repeat",
-                "warn": warn_count,
-                "muted": mute_info,
-                "display": display,
-            }
-
-        exp_events: List[Dict[str, Any]] = list(udata.get("exp_events", []))
-        exp_events = [
-            e
-            for e in exp_events
-            if e.get("ts") and e["ts"] >= dt - timedelta(minutes=1)
-        ]
-
-        can_count = len(exp_events) < 3
-
-        gained = 0
-        levelup: Optional[Dict[str, Any]] = None
-
-        total_exp = int(udata.get("total_exp", 0))
-        prev_level = int(udata.get("current_level", compute_level(total_exp)[0]))
-
-        if can_count:
-            exp_res = calculate_exp(text, dt)
-            gained = exp_res.gained_exp
-            if gained > 0:
-                exp_events.append({"ts": dt, "exp": gained})
-                total_exp += gained
-
-        new_level, progress, need = compute_level(total_exp)
-        if new_level != prev_level:
-            levelup = {"level": new_level}
-
-        exp_gained_date = udata.get("exp_gained_date")
-        exp_gained_today = int(udata.get("exp_gained_today", 0))
-        if exp_gained_date != today:
-            exp_gained_today = 0
-            exp_gained_date = today
-
-        if gained > 0:
-            exp_gained_today += gained
-
-        last_messages.append({"raw": text, "norm": norm, "ts": dt})
-        last_messages = sorted(last_messages, key=lambda x: x["ts"])[-8:]
-
-        txn.set(
-            uref,
+        uref.set(
             {
                 "user_id": user_id,
                 "username": username or None,
                 "display": display,
-                "total_exp": total_exp,
-                "current_level": new_level,
-                "exp_events": exp_events,
-                "last_messages": last_messages,
                 "warn_count": warn_count,
                 "warn_reset_at": warn_reset_at,
-                "mute_until": None,
+                "mute_tier_today": mute_tier_today,
+                "mute_tier_date": mute_tier_date,
                 "last_seen": dt,
                 "last_active_date": today,
-                "exp_gained_date": exp_gained_date,
-                "exp_gained_today": exp_gained_today,
             },
             merge=True,
         )
 
-        txn.set(
-            cref,
+        last_messages.append({"raw": text, "norm": norm, "ts": dt})
+        last_messages = sorted(last_messages, key=lambda x: x["ts"])[-8:]
+        uref.set({"last_messages": last_messages}, merge=True)
+
+        cref.set(
             {
                 "chat_id": chat_id,
                 "title": chat_title,
@@ -429,41 +336,80 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             merge=True,
         )
 
-        return {
-            "action": "ok",
-            "gained": gained,
-            "levelup": levelup,
-            "display": display,
-            "fever": is_fever_time(dt),
-        }
-
-    result = txn_fn(txn)
-
-    if result.get("action") == "blocked":
         await maybe_delete_message(update, context)
-
-        warn = result.get("warn", 0)
-        display = result.get("display", "")
         await update.effective_chat.send_message(
-            f"⚠️ {display}님 도배/스팸 감지!\n경고 {warn}/3"
+            f"⚠️ {display}님 도배/스팸 감지!\n경고 {warn_count}/3"
         )
 
-        muted = result.get("muted")
-        if muted:
-            until = muted["until"]
-            minutes = muted["minutes"]
+        if mute_info:
+            until = mute_info["until"]
+            minutes = mute_info["minutes"]
             await restrict_user(context, chat_id, user_id, until)
             await update.effective_chat.send_message(
                 f"🔇 {display}님 경고 누적으로 {minutes}분간 뮤트 처리되었습니다."
             )
         return
 
-    if result.get("action") == "ok":
-        levelup = result.get("levelup")
-        if levelup:
-            await update.effective_chat.send_message(
-                f"🎉 {result['display']}님 레벨 업!\n현재 레벨 Lv.{levelup['level']}"
-            )
+    exp_events: List[Dict[str, Any]] = list(udata.get("exp_events", []))
+    exp_events = [e for e in exp_events if e.get("ts") and e["ts"] >= dt - timedelta(minutes=1)]
+    can_count = len(exp_events) < 3
+
+    gained = 0
+    total_exp = int(udata.get("total_exp", 0))
+    prev_level = int(udata.get("current_level", compute_level(total_exp)[0]))
+
+    if can_count:
+        exp_res = calculate_exp(text, dt)
+        gained = exp_res.gained_exp
+        if gained > 0:
+            exp_events.append({"ts": dt, "exp": gained})
+            total_exp += gained
+
+    new_level, progress, need = compute_level(total_exp)
+
+    exp_gained_date = udata.get("exp_gained_date")
+    exp_gained_today = int(udata.get("exp_gained_today", 0))
+    if exp_gained_date != today:
+        exp_gained_today = 0
+        exp_gained_date = today
+    if gained > 0:
+        exp_gained_today += gained
+
+    last_messages.append({"raw": text, "norm": norm, "ts": dt})
+    last_messages = sorted(last_messages, key=lambda x: x["ts"])[-8:]
+
+    uref.set(
+        {
+            "user_id": user_id,
+            "username": username or None,
+            "display": display,
+            "total_exp": total_exp,
+            "current_level": new_level,
+            "exp_events": exp_events,
+            "last_messages": last_messages,
+            "warn_count": warn_count,
+            "warn_reset_at": warn_reset_at,
+            "last_seen": dt,
+            "last_active_date": today,
+            "exp_gained_date": exp_gained_date,
+            "exp_gained_today": exp_gained_today,
+        },
+        merge=True,
+    )
+
+    cref.set(
+        {
+            "chat_id": chat_id,
+            "title": chat_title,
+            "last_seen": dt,
+        },
+        merge=True,
+    )
+
+    if new_level != prev_level:
+        await update.effective_chat.send_message(
+            f"🎉 {display}님 레벨 업!\n현재 레벨 Lv.{new_level}"
+        )
 
 
 async def send_fever_start(context: ContextTypes.DEFAULT_TYPE) -> None:
