@@ -115,8 +115,110 @@ def kst_date_str(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
+def get_allowed_chat_id() -> Optional[int]:
+    raw = os.getenv("ALLOWED_CHAT_ID", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def get_owner_user_id() -> Optional[int]:
+    raw = os.getenv("OWNER_USER_ID", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def is_allowed_chat(update: Update) -> bool:
+    allowed = get_allowed_chat_id()
+    if allowed is None:
+        return True
+    if update.effective_chat is None:
+        return False
+    return int(update.effective_chat.id) == allowed
+
+
+def delete_collection(coll_ref: firestore.CollectionReference, batch_size: int = 200) -> int:
+    deleted = 0
+    while True:
+        docs = list(coll_ref.limit(batch_size).stream())
+        if not docs:
+            break
+        batch = coll_ref._client.batch()
+        for d in docs:
+            batch.delete(d.reference)
+        batch.commit()
+        deleted += len(docs)
+    return deleted
+
+
+async def handle_reset_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_user is None or update.message is None:
+        return
+
+    if not is_allowed_chat(update):
+        return
+
+    owner_id = get_owner_user_id()
+    if owner_id is None or int(update.effective_user.id) != owner_id:
+        await update.message.reply_text("권한이 없습니다.")
+        return
+
+    text = (update.message.text or "").strip().lower()
+    if text != "!reset_db confirm":
+        await update.message.reply_text("DB 초기화는 `!RESET_DB CONFIRM` 으로만 가능합니다.")
+        return
+
+    db = get_firebase_client()
+    chat_id = int(update.effective_chat.id)
+    cref = chat_ref(db, chat_id)
+
+    try:
+        users_coll = cref.collection("users")
+        deleted_users = delete_collection(users_coll)
+        cref.delete()
+    except Exception:
+        await update.message.reply_text("DB 초기화 중 오류가 발생했습니다.")
+        return
+
+    await update.message.reply_text(f"DB 초기화 완료. 삭제된 유저 데이터: {deleted_users}개")
+
+
+def is_anonymous_admin_message(update: Update) -> bool:
+    if update.message is None:
+        return False
+
+    if update.message.sender_chat is None:
+        return False
+
+    fu = update.message.from_user
+    if fu is None:
+        return True
+
+    if fu.is_bot and (fu.username == "GroupAnonymousBot" or fu.full_name == "GroupAnonymousBot"):
+        return True
+
+    return False
+
+
 async def handle_exp_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None or update.effective_user is None:
+        return
+
+    if not is_allowed_chat(update):
+        return
+
+    if is_anonymous_admin_message(update):
+        await update.message.reply_text(
+            "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+            "익명 관리자 모드를 끄고 다시 `!EXP`를 입력해 주세요."
+        )
         return
 
     if update.effective_chat.type not in (ChatType.SUPERGROUP, ChatType.GROUP):
@@ -227,7 +329,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if update.effective_chat.type not in (ChatType.SUPERGROUP, ChatType.GROUP):
         return
 
+    if not is_allowed_chat(update):
+        return
+
     text = update.message.text
+
+    if text.strip().lower() == "!chat_id":
+        await update.message.reply_text(f"CHAT_ID: {int(update.effective_chat.id)}")
+        return
+
+    if text.strip().lower() == "!whoami":
+        u = update.effective_user
+        uname = f"@{u.username}" if u.username else (u.full_name or "")
+        await update.message.reply_text(f"USER_ID: {int(u.id)}\nUSERNAME: {uname}")
+        return
+
+    if text.strip().lower() == "!reset_db confirm" or text.strip().lower() == "!reset_db":
+        await handle_reset_db(update, context)
+        return
+
+    if is_anonymous_admin_message(update):
+        if text.strip().lower() == "!exp":
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 `!EXP`를 입력해 주세요."
+            )
+        return
 
     if text.strip().lower() == "!exp":
         await handle_exp_query(update, context)
@@ -416,6 +543,20 @@ async def send_fever_start(context: ContextTypes.DEFAULT_TYPE) -> None:
     db = get_firebase_client()
     dt = now_kst()
 
+    allowed = get_allowed_chat_id()
+    if allowed is not None:
+        try:
+            await context.bot.send_message(
+                chat_id=int(allowed),
+                text=(
+                    "🔥 피버타임이 적용됩니다!\n"
+                    "지금부터 오후 11시까지 모든 EXP 획득량 1.5배입니다."
+                ),
+            )
+        except Exception:
+            return
+        return
+
     chats = db.collection("chats").stream()
     for doc in chats:
         data = doc.to_dict() or {}
@@ -436,6 +577,20 @@ async def send_fever_start(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def send_fever_end(context: ContextTypes.DEFAULT_TYPE) -> None:
     db = get_firebase_client()
+    allowed = get_allowed_chat_id()
+    if allowed is not None:
+        try:
+            await context.bot.send_message(
+                chat_id=int(allowed),
+                text=(
+                    "🧊 피버타임 종료!\n"
+                    "이제부터 EXP는 기본 배율로 돌아갑니다."
+                ),
+            )
+        except Exception:
+            return
+        return
+
     chats = db.collection("chats").stream()
     for doc in chats:
         data = doc.to_dict() or {}
@@ -465,7 +620,14 @@ async def send_leaderboard(context: ContextTypes.DEFAULT_TYPE) -> None:
     today = kst_date_str(dt)
     fever = is_fever_time(dt)
 
-    chats = list(db.collection("chats").stream())
+    allowed = get_allowed_chat_id()
+    chats: List[Any]
+    if allowed is not None:
+        chats = [db.collection("chats").document(str(int(allowed))).get()]
+        chats = [c for c in chats if c.exists]
+    else:
+        chats = list(db.collection("chats").stream())
+
     for cdoc in chats:
         cdata = cdoc.to_dict() or {}
         chat_id = cdata.get("chat_id")
