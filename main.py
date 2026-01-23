@@ -135,6 +135,15 @@ def get_owner_user_id() -> Optional[int]:
         return None
 
 
+def is_owner(update: Update) -> bool:
+    owner_id = get_owner_user_id()
+    if owner_id is None:
+        return False
+    if update.effective_user is None:
+        return False
+    return int(update.effective_user.id) == owner_id
+
+
 def is_allowed_chat(update: Update) -> bool:
     allowed = get_allowed_chat_id()
     if allowed is None:
@@ -323,6 +332,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if update.effective_chat is None or update.effective_user is None:
         return
 
+    if update.effective_user.is_bot or int(update.effective_user.id) == 777000:
+        return
+
     if update.message is None or update.message.text is None:
         return
 
@@ -374,8 +386,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     cref = chat_ref(db, chat_id)
     uref = user_ref(db, chat_id, user_id)
 
-    norm = normalize_text(text)
-
     contains_url = URL_PATTERN.search(text) is not None
 
     chat_snap = cref.get()
@@ -385,7 +395,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     udata = user_snap.to_dict() if user_snap.exists else {}
 
     mute_until = udata.get("mute_until")
-    if mute_until and mute_until > dt:
+    if (not is_owner(update)) and mute_until and mute_until > dt:
         return
 
     warn_reset_at = udata.get("warn_reset_at")
@@ -400,22 +410,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         mute_tier_today = 0
         mute_tier_date = today
 
-    last_messages: List[Dict[str, Any]] = list(udata.get("last_messages", []))
-    last_messages = [
-        m for m in last_messages if m.get("ts") and m["ts"] >= dt - timedelta(minutes=2)
-    ]
-
-    is_repeat = False
-    for m in last_messages:
-        prev_norm = m.get("norm") or ""
-        if prev_norm == norm:
-            is_repeat = True
-            break
-        if prev_norm and similarity(prev_norm, norm) >= 0.9:
-            is_repeat = True
-            break
-
-    if contains_url or is_repeat:
+    if (not is_owner(update)) and contains_url:
         warn_count += 1
         warn_reset_at = dt + timedelta(hours=24)
 
@@ -450,10 +445,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             merge=True,
         )
 
-        last_messages.append({"raw": text, "norm": norm, "ts": dt})
-        last_messages = sorted(last_messages, key=lambda x: x["ts"])[-8:]
-        uref.set({"last_messages": last_messages}, merge=True)
-
         cref.set(
             {
                 "chat_id": chat_id,
@@ -465,7 +456,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         await maybe_delete_message(update, context)
         await update.effective_chat.send_message(
-            f"⚠️ {display}님 도배/스팸 감지!\n경고 {warn_count}/3"
+            f"⚠️ {display}님 링크 스팸 감지!\n경고 {warn_count}/3"
         )
 
         if mute_info:
