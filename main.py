@@ -75,7 +75,7 @@ def compute_level(total_exp: int) -> Tuple[int, int, int]:
 
 
 def calculate_exp(message_text: str, dt: datetime) -> ExpResult:
-    if len(message_text) < 10:
+    if len(message_text) < 5:
         return ExpResult(0, "short")
 
     has_keyword = KEYWORD_PATTERN.search(message_text) is not None
@@ -351,6 +351,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = update.message.text
+
+    if text.strip() in ("!리더보드", "!leaderboard"):
+        if not is_owner(update):
+            await update.message.reply_text("권한이 없습니다.")
+            return
+        await send_leaderboard(context)
+        return
 
     if text.strip().lower() == "!chat_id":
         await update.message.reply_text(f"CHAT_ID: {int(update.effective_chat.id)}")
