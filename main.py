@@ -19,6 +19,18 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 load_dotenv()
 
 
+_USER_LOCKS: Dict[Tuple[int, int], asyncio.Lock] = {}
+
+
+def get_user_lock(chat_id: int, user_id: int) -> asyncio.Lock:
+    key = (int(chat_id), int(user_id))
+    lock = _USER_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _USER_LOCKS[key] = lock
+    return lock
+
+
 KST_TZ = "Asia/Seoul"
 
 KEYWORD_PATTERN = re.compile(r"(?i)(\bbased\b|베이스드)")
@@ -242,40 +254,42 @@ async def handle_exp_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     db = get_firebase_client()
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    username = update.effective_user.username
-    display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
 
-    dt = now_kst()
-    date_key = kst_date_str(dt)
+    async with get_user_lock(chat_id, user_id):
+        username = update.effective_user.username
+        display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
 
-    uref = user_ref(db, chat_id, user_id)
+        dt = now_kst()
+        date_key = kst_date_str(dt)
 
-    snap = uref.get()
-    data = snap.to_dict() if snap.exists else {}
+        uref = user_ref(db, chat_id, user_id)
 
-    qts: List[Dict[str, Any]] = list(data.get("exp_query_timestamps", []))
-    cutoff = dt - timedelta(hours=24)
-    qts = [x for x in qts if x.get("ts") and x["ts"] >= cutoff]
+        snap = uref.get()
+        data = snap.to_dict() if snap.exists else {}
 
-    if len(qts) >= 3:
-        await update.message.reply_text("24시간 내 !EXP 조회 횟수 제한(3회)에 도달했습니다.")
-        return
+        qts: List[Dict[str, Any]] = list(data.get("exp_query_timestamps", []))
+        cutoff = dt - timedelta(hours=24)
+        qts = [x for x in qts if x.get("ts") and x["ts"] >= cutoff]
 
-    qts.append({"ts": dt})
-    uref.set(
-        {
-            "user_id": user_id,
-            "username": username or None,
-            "display": display,
-            "exp_query_timestamps": qts,
-            "last_seen": dt,
-        },
-        merge=True,
-    )
+        if len(qts) >= 3:
+            await update.message.reply_text("24시간 내 !EXP 조회 횟수 제한(3회)에 도달했습니다.")
+            return
 
-    total_exp = int(data.get("total_exp", 0))
-    level, progress, need = compute_level(total_exp)
-    remaining = need - progress
+        qts.append({"ts": dt})
+        uref.set(
+            {
+                "user_id": user_id,
+                "username": username or None,
+                "display": display,
+                "exp_query_timestamps": qts,
+                "last_seen": dt,
+            },
+            merge=True,
+        )
+
+        total_exp = int(data.get("total_exp", 0))
+        level, progress, need = compute_level(total_exp)
+        remaining = need - progress
 
     result = {
         "ok": True,
@@ -374,16 +388,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if is_anonymous_admin_message(update):
-        if text.strip().lower() == "!exp":
+        if text.strip().lower() in ("!exp", ".exp"):
             await update.message.reply_text(
                 "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
                 "익명 관리자 모드를 끄고 다시 `!EXP`를 입력해 주세요."
             )
         return
 
-    if text.strip().lower() == "!exp":
+    if text.strip().lower() in ("!exp", ".exp"):
         await handle_exp_query(update, context)
         return
+
+    async with get_user_lock(update.effective_chat.id, update.effective_user.id):
+        await _handle_message_locked(update, context)
+
+
+async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_user is None:
+        return
+
+    if update.message is None or update.message.text is None:
+        return
+
+    text = update.message.text
 
     db = get_firebase_client()
     dt = now_kst()
@@ -506,9 +533,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if gained > 0:
         exp_gained_today += gained
 
-    last_messages.append({"raw": text, "norm": norm, "ts": dt})
-    last_messages = sorted(last_messages, key=lambda x: x["ts"])[-8:]
-
     uref.set(
         {
             "user_id": user_id,
@@ -517,7 +541,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "total_exp": total_exp,
             "current_level": new_level,
             "exp_events": exp_events,
-            "last_messages": last_messages,
             "warn_count": warn_count,
             "warn_reset_at": warn_reset_at,
             "last_seen": dt,
