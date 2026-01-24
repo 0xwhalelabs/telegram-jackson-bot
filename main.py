@@ -45,6 +45,12 @@ def is_fever_time(dt: datetime) -> bool:
     return start <= dt < end
 
 
+def is_link_block_time(dt: datetime) -> bool:
+    start = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = dt.replace(hour=9, minute=0, second=0, microsecond=0)
+    return start <= dt < end
+
+
 def normalize_text(text: str) -> str:
     text = text.lower()
     text = re.sub(r"[\s]+", " ", text).strip()
@@ -410,7 +416,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         mute_tier_today = 0
         mute_tier_date = today
 
-    if (not is_owner(update)) and contains_url:
+    if (not is_owner(update)) and contains_url and is_link_block_time(dt):
         warn_count += 1
         warn_reset_at = dt + timedelta(hours=24)
 
