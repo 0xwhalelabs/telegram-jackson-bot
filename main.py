@@ -810,7 +810,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             try:
                 await update.effective_chat.send_animation(animation=egg_url, caption=msg)
             except Exception:
-                await update.message.reply_text(msg)
+                b = await download_url_bytes(egg_url)
+                if b:
+                    try:
+                        await update.effective_chat.send_animation(
+                            animation=InputFile(io.BytesIO(b), filename="palegg.gif"),
+                            caption=msg,
+                        )
+                    except Exception:
+                        await update.message.reply_text(msg)
+                else:
+                    await update.message.reply_text(msg)
         else:
             await update.message.reply_text(msg)
         return
@@ -893,7 +903,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 try:
                     await update.effective_chat.send_photo(photo=img, caption=caption)
                 except Exception:
-                    await update.effective_chat.send_message(caption)
+                    b = await download_url_bytes(img)
+                    if b:
+                        try:
+                            await update.effective_chat.send_photo(
+                                photo=InputFile(io.BytesIO(b), filename="pal.png"),
+                                caption=caption,
+                            )
+                        except Exception:
+                            await update.effective_chat.send_message(caption)
+                    else:
+                        await update.effective_chat.send_message(caption)
             else:
                 await update.effective_chat.send_message(caption)
         return
@@ -946,7 +966,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     else:
                         await update.message.reply_text(msg)
             else:
-                base = get_pals_asset_base_url()
                 await update.message.reply_text(msg)
             return
 
@@ -998,7 +1017,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 else:
                     await update.message.reply_text(msg)
         else:
-            base = get_pals_asset_base_url()
             await update.message.reply_text(msg)
         return
 
@@ -1727,7 +1745,17 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
                 try:
                     await update.effective_chat.send_photo(photo=img, caption=caption)
                 except Exception:
-                    await update.effective_chat.send_message(caption)
+                    b = await download_url_bytes(img)
+                    if b:
+                        try:
+                            await update.effective_chat.send_photo(
+                                photo=InputFile(io.BytesIO(b), filename="pal.png"),
+                                caption=caption,
+                            )
+                        except Exception:
+                            await update.effective_chat.send_message(caption)
+                    else:
+                        await update.effective_chat.send_message(caption)
             else:
                 await update.effective_chat.send_message(caption)
 
@@ -1786,7 +1814,18 @@ async def pals_hatch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 await context.bot.send_photo(chat_id=chat_id, photo=img, caption=msg)
             except Exception:
-                await context.bot.send_message(chat_id=chat_id, text=msg)
+                b = await download_url_bytes(img)
+                if b:
+                    try:
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=InputFile(io.BytesIO(b), filename="pal.png"),
+                            caption=msg,
+                        )
+                    except Exception:
+                        await context.bot.send_message(chat_id=chat_id, text=msg)
+                else:
+                    await context.bot.send_message(chat_id=chat_id, text=msg)
         else:
             await context.bot.send_message(chat_id=chat_id, text=msg)
 
