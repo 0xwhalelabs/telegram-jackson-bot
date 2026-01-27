@@ -921,9 +921,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data.startswith("yacha_accept:"):
         parts = data.split(":")
-        if len(parts) != 6:
+        if len(parts) == 5:
+            _, cid, challenger_id, opponent_id, decision = parts
+        elif len(parts) == 6:
+            _, _, cid, challenger_id, opponent_id, decision = parts
+        else:
             return
-        _, _, cid, challenger_id, opponent_id, decision = parts
         if int(cid) != chat_id:
             return
         duel = get_active_duel(chat_id)
