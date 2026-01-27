@@ -569,15 +569,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 uref = user_ref(db, chat_id_for_lock, int(update.effective_user.id))
                 snap = uref.get()
                 data = snap.to_dict() if snap.exists else {}
-                uses: List[Dict[str, Any]] = list(data.get("yacha_uses", []))
-                cutoff = dt - timedelta(hours=24)
-                uses = [x for x in uses if x.get("ts") and x["ts"] >= cutoff]
-                if len(uses) >= 2:
-                    await update.message.reply_text("야차는 24시간 동안 2번만 사용할 수 있습니다.")
+                yacha_uses_date = data.get("yacha_uses_date")
+                yacha_uses_today = int(data.get("yacha_uses_today", 0))
+                today_kst = kst_date_str(dt)
+                if yacha_uses_date != today_kst:
+                    yacha_uses_date = today_kst
+                    yacha_uses_today = 0
+                if yacha_uses_today >= 5:
+                    await update.message.reply_text("야차는 하루 5번만 사용할 수 있습니다.")
                     return
-
-                uses.append({"ts": dt})
-                uref.set({"yacha_uses": uses, "last_seen": dt}, merge=True)
+                yacha_uses_today += 1
+                uref.set({"yacha_uses_date": yacha_uses_date, "yacha_uses_today": yacha_uses_today, "last_seen": dt}, merge=True)
 
                 context.chat_data["yacha_pending"] = {
                     "challenger_id": int(update.effective_user.id),
@@ -749,65 +751,6 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
         warn_count = 0
         warn_reset_at = dt + timedelta(hours=24)
 
-    last_text = udata.get("last_text")
-    last_text_ts = udata.get("last_text_ts")
-    is_consecutive_repeat = False
-    if last_text and isinstance(last_text, str) and cur_text:
-        if last_text == cur_text:
-            if last_text_ts and last_text_ts >= dt - timedelta(minutes=5):
-                is_consecutive_repeat = True
-
-    if (not is_owner(update)) and is_consecutive_repeat:
-        warn_count += 1
-        warn_reset_at = dt + timedelta(hours=24)
-
-        display_warn_count = warn_count
-
-        total_exp = int(udata.get("total_exp", 0))
-        current_level = int(udata.get("current_level", compute_level(total_exp)[0]))
-        kicked = False
-        if warn_count >= 3:
-            total_exp = max(0, total_exp - 100)
-            current_level = compute_level(total_exp)[0]
-            warn_count = 0
-            kicked = True
-
-        uref.set(
-            {
-                "user_id": user_id,
-                "username": username or None,
-                "display": display,
-                "warn_count": warn_count,
-                "warn_reset_at": warn_reset_at,
-                "total_exp": total_exp,
-                "current_level": current_level,
-                "last_text": cur_text,
-                "last_text_ts": dt,
-                "last_seen": dt,
-                "last_active_date": today,
-            },
-            merge=True,
-        )
-        cref.set(
-            {
-                "chat_id": chat_id,
-                "title": chat_title,
-                "last_seen": dt,
-            },
-            merge=True,
-        )
-
-        await update.effective_chat.send_message(
-            "삐빅! 동일 메시지 반복 경고입니다. 경고 3회누적시 강퇴처리되며 해당 유저의 경험치는 -100이됩니다. "
-            f"{display}님 누적 경고수 {display_warn_count}회"
-        )
-
-        if kicked:
-            await kick_user(context, int(chat_id), int(user_id))
-            await update.effective_chat.send_message(
-                f"{display}님 경고 3회 누적으로 강퇴 및 EXP -100 처리되었습니다."
-            )
-        return
 
     mute_tier_date = udata.get("mute_tier_date")
     mute_tier_today = int(udata.get("mute_tier_today", 0))
@@ -872,8 +815,6 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
                 f"🔇 {display}님 경고 누적으로 {minutes}분간 뮤트 처리되었습니다."
             )
         return
-
-    uref.set({"last_text": cur_text, "last_text_ts": dt}, merge=True)
 
     exp_events: List[Dict[str, Any]] = list(udata.get("exp_events", []))
     exp_events = [e for e in exp_events if e.get("ts") and e["ts"] >= dt - timedelta(minutes=1)]
@@ -1002,9 +943,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data.startswith("yacha_rps:"):
         parts = data.split(":")
-        if len(parts) != 6:
+        if len(parts) == 5:
+            _, cid, challenger_id, opponent_id, choice = parts
+        elif len(parts) == 6:
+            _, _, cid, challenger_id, opponent_id, choice = parts
+        else:
             return
-        _, _, cid, challenger_id, opponent_id, choice = parts
         if int(cid) != chat_id:
             return
         duel = get_active_duel(chat_id)
