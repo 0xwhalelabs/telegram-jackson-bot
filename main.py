@@ -1,9 +1,11 @@
 import asyncio
 import base64
+import io
 import json
 import os
 import random
 import re
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time
 from difflib import SequenceMatcher
@@ -12,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from firebase_admin import credentials, firestore
 import firebase_admin
-from telegram import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ChatType
 from telegram.ext import (
     Application,
@@ -316,6 +318,27 @@ def format_timedelta_kor(seconds: int) -> str:
     if h > 0:
         return f"{h}시간 {m}분"
     return f"{m}분"
+
+
+def _download_url_bytes_sync(url: str, timeout_seconds: int = 15) -> bytes:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "*/*",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+        return resp.read()
+
+
+async def download_url_bytes(url: str, timeout_seconds: int = 15) -> Optional[bytes]:
+    if not url:
+        return None
+    try:
+        return await asyncio.to_thread(_download_url_bytes_sync, url, timeout_seconds)
+    except Exception:
+        return None
 
 
 SWORD_MAX_LEVEL = 20
@@ -911,7 +934,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 try:
                     await update.effective_chat.send_animation(animation=egg_url, caption=msg)
                 except Exception:
-                    await update.message.reply_text(f"{msg}\n\n(이미지 URL)\n{egg_url}")
+                    b = await download_url_bytes(egg_url)
+                    if b:
+                        try:
+                            await update.effective_chat.send_animation(
+                                animation=InputFile(io.BytesIO(b), filename="palegg.gif"),
+                                caption=msg,
+                            )
+                        except Exception:
+                            await update.message.reply_text(f"{msg}\n\n(이미지 URL)\n{egg_url}")
+                    else:
+                        await update.message.reply_text(f"{msg}\n\n(이미지 URL)\n{egg_url}")
             else:
                 base = get_pals_asset_base_url()
                 await update.message.reply_text(
@@ -957,7 +990,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             try:
                 await update.effective_chat.send_photo(photo=img, caption=msg)
             except Exception:
-                await update.message.reply_text(f"{msg}\n\n(이미지 URL)\n{img}")
+                b = await download_url_bytes(img)
+                if b:
+                    try:
+                        await update.effective_chat.send_photo(
+                            photo=InputFile(io.BytesIO(b), filename="pal.png"),
+                            caption=msg,
+                        )
+                    except Exception:
+                        await update.message.reply_text(f"{msg}\n\n(이미지 URL)\n{img}")
+                else:
+                    await update.message.reply_text(f"{msg}\n\n(이미지 URL)\n{img}")
         else:
             base = get_pals_asset_base_url()
             await update.message.reply_text(
