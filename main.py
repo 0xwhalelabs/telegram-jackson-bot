@@ -264,16 +264,16 @@ PALS_STAGE_FOLDER: Dict[str, str] = {
 }
 
 PALS_EVOLVE_AT: Dict[str, int] = {
-    "baby": 10_000,
-    "teen": 20_000,
-    "adult": 50_000,
+    "baby": 500,
+    "teen": 3_500,
+    "adult": 10_000,
 }
 
 PALS_PAYOUT_EXP: Dict[str, int] = {
-    "baby": 0,
-    "teen": 100,
-    "adult": 200,
-    "ultimate": 1000,
+    "baby": 100,
+    "teen": 1000,
+    "adult": 3000,
+    "ultimate": 5000,
 }
 
 
