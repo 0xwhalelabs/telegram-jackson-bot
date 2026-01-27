@@ -490,22 +490,11 @@ async def handle_exp_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         snap = uref.get()
         data = snap.to_dict() if snap.exists else {}
-
-        qts: List[Dict[str, Any]] = list(data.get("exp_query_timestamps", []))
-        cutoff = dt - timedelta(hours=24)
-        qts = [x for x in qts if x.get("ts") and x["ts"] >= cutoff]
-
-        if len(qts) >= 3:
-            await update.message.reply_text("24시간 내 !EXP 조회 횟수 제한(3회)에 도달했습니다.")
-            return
-
-        qts.append({"ts": dt})
         uref.set(
             {
                 "user_id": user_id,
                 "username": username or None,
                 "display": display,
-                "exp_query_timestamps": qts,
                 "last_seen": dt,
             },
             merge=True,
@@ -615,6 +604,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = update.message.text
+
+    if text.strip() == "!가이드":
+        await update.message.reply_text(
+            "Whalet BOT 명령어 가이드\n"
+            "\n"
+            "[EXP/레벨]\n"
+            "- !exp / .exp: 내 EXP/레벨/순위 확인\n"
+            "\n"
+            "[출석]\n"
+            "- !출첵: 하루 1회 100EXP (출첵 완료 메시지)\n"
+            "\n"
+            "[메뉴 추천]\n"
+            "- !점메추: 점심 메뉴 랜덤 추천\n"
+            "- !저메추: 저녁 메뉴 랜덤 추천\n"
+            "\n"
+            "[덤벼고래 (가위바위보)]\n"
+            "- !덤벼고래: 방장에게만 도전 가능한 가위바위보\n"
+            "  (하루 2회, 이기면 방장 EXP에서 최대 50EXP 획득)\n"
+            "\n"
+            "[검 키우기]\n"
+            "- !인벤토리: 현재 검/방어티켓 확인\n"
+            "- !강화확률: 강화 단계별 비용/확률/판매가 확인\n"
+            "- !오른: 강화 진행(확정 버튼)\n"
+            "- !당근마켓: 현재 검 판매(확정 버튼)\n"
+            "- !베이스드몰: 검 구매(100EXP, 검이 없을 때만 가능)\n"
+            "\n"
+            "[기타]\n"
+            "- !whoami: 내 USER_ID/USERNAME 확인\n"
+        )
+        return
 
     if text.strip() == "!베이스드몰":
         if is_anonymous_admin_message(update):
@@ -1744,6 +1763,8 @@ async def send_leaderboard(context: ContextTypes.DEFAULT_TYPE) -> None:
             total_exp = int(udata.get("total_exp", 0))
             level = int(udata.get("current_level", compute_level(total_exp)[0]))
             display = udata.get("display") or udata.get("username") or udoc.id
+            if isinstance(display, str) and display.startswith("@"):
+                display = display[1:]
 
             user_rows.append(
                 {
