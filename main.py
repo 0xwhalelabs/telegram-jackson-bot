@@ -228,6 +228,92 @@ def rps_result(a_choice: str, b_choice: str) -> int:
     return -1
 
 
+PALS_EGG_PRICE_EXP = 100
+PALS_FEED_PRICE_EXP = 5
+
+PALS_TYPES: List[str] = [
+    "블루",
+    "그린",
+    "퍼플",
+    "핑크",
+    "레드",
+]
+
+PALS_TYPE_SLUG: Dict[int, str] = {
+    1: "blue",
+    2: "green",
+    3: "purple",
+    4: "pink",
+    5: "red",
+}
+
+PALS_STAGE_LABEL: Dict[str, str] = {
+    "baby": "유아기",
+    "teen": "성장기",
+    "adult": "완전체",
+    "ultimate": "궁극체",
+}
+
+PALS_STAGE_FOLDER: Dict[str, str] = {
+    "baby": "baby",
+    "teen": "child",
+    "adult": "drake",
+    "ultimate": "adult",
+}
+
+PALS_EVOLVE_AT: Dict[str, int] = {
+    "baby": 10_000,
+    "teen": 20_000,
+    "adult": 50_000,
+}
+
+PALS_PAYOUT_EXP: Dict[str, int] = {
+    "baby": 0,
+    "teen": 100,
+    "adult": 200,
+    "ultimate": 1000,
+}
+
+
+def get_pals_asset_base_url() -> str:
+    return os.getenv("PALS_ASSET_BASE_URL", "").strip().rstrip("/")
+
+
+def pals_egg_gif_url() -> str:
+    base = get_pals_asset_base_url()
+    if not base:
+        return ""
+    return f"{base}/palegg.gif"
+
+
+def pals_stage_image_url(stage: str, type_id: int) -> str:
+    base = get_pals_asset_base_url()
+    if not base:
+        return ""
+    prefix = PALS_STAGE_FOLDER.get(str(stage), "baby")
+    tid = max(1, min(int(type_id), 5))
+    slug = PALS_TYPE_SLUG.get(tid, "blue")
+    return f"{base}/{prefix}{slug}.png"
+
+
+def pals_type_name(type_id: int) -> str:
+    tid = max(1, min(int(type_id), 5))
+    return PALS_TYPES[tid - 1]
+
+
+def pals_display_title(stage: str, type_id: int) -> str:
+    return f"{pals_type_name(type_id)} Pals – {PALS_STAGE_LABEL.get(str(stage), '유아기')}"
+
+
+def format_timedelta_kor(seconds: int) -> str:
+    s = max(0, int(seconds))
+    h = s // 3600
+    m = (s % 3600) // 60
+    if h > 0:
+        return f"{h}시간 {m}분"
+    return f"{m}분"
+
+
 SWORD_MAX_LEVEL = 20
 SWORD_NONE_LEVEL = -1
 BASED_MALL_SWORD_LEVEL = 0
@@ -354,7 +440,6 @@ def delete_collection(coll_ref: firestore.CollectionReference, batch_size: int =
 async def handle_reset_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None or update.effective_user is None or update.message is None:
         return
-
     if not is_allowed_chat(update):
         return
 
@@ -623,6 +708,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "- !덤벼고래: 방장에게만 도전 가능한 가위바위보\n"
             "  (하루 2회, 이기면 방장 EXP에서 최대 50EXP 획득)\n"
             "\n"
+            "[Based Pals]\n"
+            "- !알구매: 100EXP로 알 구매 (1시간 후 부화)\n"
+            "- !먹이: 5EXP로 성장치 +5\n"
+            "- !마이팔: 내 Pals/알 상태 확인\n"
+            "\n"
             "[검 키우기]\n"
             "- !인벤토리: 현재 검/방어티켓 확인\n"
             "- !강화확률: 강화 단계별 비용/확률/판매가 확인\n"
@@ -633,6 +723,234 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "[기타]\n"
             "- !whoami: 내 USER_ID/USERNAME 확인\n"
         )
+        return
+
+    if text.strip() == "!알구매":
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 `!알구매`를 입력해 주세요."
+            )
+            return
+
+        chat_id = int(update.effective_chat.id)
+        user_id = int(update.effective_user.id)
+        async with get_user_lock(chat_id, user_id):
+            db = get_firebase_client()
+            dt = now_kst()
+            today = kst_date_str(dt)
+            uref = user_ref(db, chat_id, user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+
+            if udata.get("pal") or udata.get("egg"):
+                await update.message.reply_text("이미 Pals(또는 알)을 보유 중입니다.")
+                return
+
+            username = update.effective_user.username
+            display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+
+            total_exp = int(udata.get("total_exp", 0))
+            if total_exp < PALS_EGG_PRICE_EXP:
+                await update.message.reply_text(f"EXP가 부족합니다. (필요 {PALS_EGG_PRICE_EXP}EXP)")
+                return
+
+            total_exp -= PALS_EGG_PRICE_EXP
+            level = compute_level(total_exp)[0]
+            hatch_at = dt + timedelta(hours=1)
+            uref.set(
+                {
+                    "user_id": user_id,
+                    "username": username or None,
+                    "display": display,
+                    "total_exp": total_exp,
+                    "current_level": level,
+                    "egg": {"hatch_at": hatch_at},
+                    "pal": firestore.DELETE_FIELD,
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+
+        egg_url = pals_egg_gif_url()
+        msg = (
+            f"{display} 님\n"
+            f"{PALS_EGG_PRICE_EXP} EXP를 사용해 알을 획득했습니다 🥚\n"
+            "1시간 후 부화합니다."
+        )
+        if egg_url:
+            try:
+                await update.effective_chat.send_animation(animation=egg_url, caption=msg)
+            except Exception:
+                await update.message.reply_text(msg)
+        else:
+            await update.message.reply_text(msg)
+        return
+
+    if text.strip() == "!먹이":
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 `!먹이`를 입력해 주세요."
+            )
+            return
+
+        chat_id = int(update.effective_chat.id)
+        user_id = int(update.effective_user.id)
+        async with get_user_lock(chat_id, user_id):
+            db = get_firebase_client()
+            dt = now_kst()
+            today = kst_date_str(dt)
+            uref = user_ref(db, chat_id, user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+
+            pal = udata.get("pal")
+            if not isinstance(pal, dict):
+                await update.message.reply_text("현재 Pals가 없습니다. 먼저 `!알구매`로 알을 구매해 주세요.")
+                return
+
+            total_exp = int(udata.get("total_exp", 0))
+            if total_exp < PALS_FEED_PRICE_EXP:
+                await update.message.reply_text(f"EXP가 부족합니다. (필요 {PALS_FEED_PRICE_EXP}EXP)")
+                return
+
+            stage = str(pal.get("stage") or "baby")
+            type_id = int(pal.get("type_id") or 1)
+            growth = int(pal.get("growth") or 0)
+            growth += 5
+            total_exp -= PALS_FEED_PRICE_EXP
+
+            next_stage = stage
+            if stage == "baby" and growth >= PALS_EVOLVE_AT["baby"]:
+                next_stage = "teen"
+            elif stage == "teen" and growth >= PALS_EVOLVE_AT["teen"]:
+                next_stage = "adult"
+            elif stage == "adult" and growth >= PALS_EVOLVE_AT["adult"]:
+                next_stage = "ultimate"
+
+            level = compute_level(total_exp)[0]
+            pal2 = dict(pal)
+            pal2["growth"] = growth
+            pal2["stage"] = next_stage
+
+            uref.set(
+                {
+                    "total_exp": total_exp,
+                    "current_level": level,
+                    "pal": pal2,
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+
+            username = update.effective_user.username
+            display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+
+        await update.message.reply_text(
+            f"{display} 님\n"
+            f"먹이를 주었습니다! (-{PALS_FEED_PRICE_EXP}EXP)\n"
+            f"성장치 +5 (현재 {growth})"
+        )
+
+        if next_stage != stage:
+            img = pals_stage_image_url(next_stage, type_id)
+            caption = (
+                "✨ 진화 알림\n\n"
+                f"{display} 님의 [{pals_display_title(stage, type_id)}]가\n"
+                f"[{pals_display_title(next_stage, type_id)}]로 진화했습니다!"
+            )
+            if img:
+                try:
+                    await update.effective_chat.send_photo(photo=img, caption=caption)
+                except Exception:
+                    await update.effective_chat.send_message(caption)
+            else:
+                await update.effective_chat.send_message(caption)
+        return
+
+    if text.strip() == "!마이팔":
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 `!마이팔`을 입력해 주세요."
+            )
+            return
+
+        chat_id = int(update.effective_chat.id)
+        user_id = int(update.effective_user.id)
+        async with get_user_lock(chat_id, user_id):
+            db = get_firebase_client()
+            dt = now_kst()
+            uref = user_ref(db, chat_id, user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+
+            username = update.effective_user.username
+            display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+
+            egg = udata.get("egg")
+            pal = udata.get("pal")
+
+        if isinstance(egg, dict) and egg.get("hatch_at"):
+            hatch_at = egg.get("hatch_at")
+            remain = int((hatch_at - now_kst()).total_seconds())
+            msg = (
+                f"{display} 님\n"
+                "현재 알을 보유 중입니다 🥚\n"
+                f"부화까지 남은 시간: {format_timedelta_kor(remain)}"
+            )
+            egg_url = pals_egg_gif_url()
+            if egg_url:
+                try:
+                    await update.effective_chat.send_animation(animation=egg_url, caption=msg)
+                except Exception:
+                    await update.message.reply_text(msg)
+            else:
+                await update.message.reply_text(msg)
+            return
+
+        if not isinstance(pal, dict):
+            await update.message.reply_text("현재 Pals(또는 알)이 없습니다. `!알구매`로 시작해 주세요.")
+            return
+
+        stage = str(pal.get("stage") or "baby")
+        type_id = int(pal.get("type_id") or 1)
+        growth = int(pal.get("growth") or 0)
+
+        next_need = None
+        if stage in PALS_EVOLVE_AT:
+            next_need = int(PALS_EVOLVE_AT[stage])
+        next_txt = "MAX"
+        if next_need is not None:
+            next_txt = f"{growth}/{next_need} (남은 {max(0, next_need - growth)})"
+
+        payout = int(PALS_PAYOUT_EXP.get(stage, 0))
+        last_payout_at = pal.get("last_payout_at")
+        remain_payout_txt = "-"
+        if payout > 0 and last_payout_at:
+            remain_s = int((last_payout_at + timedelta(hours=24) - now_kst()).total_seconds())
+            remain_payout_txt = format_timedelta_kor(remain_s)
+
+        msg = (
+            f"{display} 님\n"
+            f"[{pals_display_title(stage, type_id)}]\n"
+            f"성장치: {growth}\n"
+            f"다음 진화: {next_txt}\n"
+            f"24h 수익: {payout}EXP\n"
+            f"다음 수익까지: {remain_payout_txt}"
+        )
+
+        img = pals_stage_image_url(stage, type_id)
+        if img:
+            try:
+                await update.effective_chat.send_photo(photo=img, caption=msg)
+            except Exception:
+                await update.message.reply_text(msg)
+        else:
+            await update.message.reply_text(msg)
         return
 
     if text.strip() == "!베이스드몰":
@@ -1282,6 +1600,26 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
             exp_events.append({"ts": dt, "exp": gained})
             total_exp += gained
 
+    pal = udata.get("pal")
+    if isinstance(pal, dict):
+        stage = str(pal.get("stage") or "baby")
+        type_id = int(pal.get("type_id") or 1)
+        growth = int(pal.get("growth") or 0)
+        growth += 5
+
+        next_stage = stage
+        if stage == "baby" and growth >= PALS_EVOLVE_AT["baby"]:
+            next_stage = "teen"
+        elif stage == "teen" and growth >= PALS_EVOLVE_AT["teen"]:
+            next_stage = "adult"
+        elif stage == "adult" and growth >= PALS_EVOLVE_AT["adult"]:
+            next_stage = "ultimate"
+
+        pal2 = dict(pal)
+        pal2["growth"] = growth
+        pal2["stage"] = next_stage
+        udata["pal"] = pal2
+
     new_level, progress, need = compute_level(total_exp)
 
     exp_gained_date = udata.get("exp_gained_date")
@@ -1306,6 +1644,7 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
             "last_active_date": today,
             "exp_gained_date": exp_gained_date,
             "exp_gained_today": exp_gained_today,
+            "pal": udata.get("pal") if isinstance(udata.get("pal"), dict) else firestore.DELETE_FIELD,
         },
         merge=True,
     )
@@ -1323,6 +1662,138 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
         await update.effective_chat.send_message(
             f"🎉 {display}님 레벨 업!\n현재 레벨 Lv.{new_level}"
         )
+
+    pal_final = udata.get("pal")
+    if isinstance(pal_final, dict):
+        stage0 = str(pal.get("stage") or "baby") if isinstance(pal, dict) else "baby"
+        stage1 = str(pal_final.get("stage") or "baby")
+        if stage1 != stage0:
+            img = pals_stage_image_url(stage1, int(pal_final.get("type_id") or 1))
+            caption = (
+                "✨ 진화 알림\n\n"
+                f"{display} 님의 [{pals_display_title(stage0, int(pal_final.get('type_id') or 1))}]가\n"
+                f"[{pals_display_title(stage1, int(pal_final.get('type_id') or 1))}]로 진화했습니다!"
+            )
+            if img:
+                try:
+                    await update.effective_chat.send_photo(photo=img, caption=caption)
+                except Exception:
+                    await update.effective_chat.send_message(caption)
+            else:
+                await update.effective_chat.send_message(caption)
+
+
+async def pals_hatch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed = get_allowed_chat_id()
+    if allowed is None:
+        return
+
+    chat_id = int(allowed)
+    db = get_firebase_client()
+    dt = now_kst()
+    today = kst_date_str(dt)
+
+    users = list(chat_ref(db, chat_id).collection("users").stream())
+    for udoc in users:
+        udata = udoc.to_dict() or {}
+        egg = udata.get("egg")
+        if not isinstance(egg, dict) or not egg.get("hatch_at"):
+            continue
+        hatch_at = egg.get("hatch_at")
+        if hatch_at > dt:
+            continue
+        if udata.get("pal"):
+            udoc.reference.set({"egg": firestore.DELETE_FIELD}, merge=True)
+            continue
+
+        type_id = random.randint(1, 5)
+        pal = {
+            "stage": "baby",
+            "type_id": type_id,
+            "growth": 0,
+            "hatched_at": dt,
+            "last_payout_at": dt,
+        }
+
+        display = udata.get("display") or (f"@{udata.get('username')}" if udata.get("username") else str(udoc.id))
+
+        udoc.reference.set(
+            {
+                "egg": firestore.DELETE_FIELD,
+                "pal": pal,
+                "last_seen": dt,
+                "last_active_date": today,
+            },
+            merge=True,
+        )
+
+        msg = (
+            "🐣 부화 알림\n\n"
+            f"{display} 님의 알이 부화했습니다!\n"
+            f"[{pals_display_title('baby', type_id)}]가 태어났습니다!"
+        )
+        img = pals_stage_image_url("baby", type_id)
+        if img:
+            try:
+                await context.bot.send_photo(chat_id=chat_id, photo=img, caption=msg)
+            except Exception:
+                await context.bot.send_message(chat_id=chat_id, text=msg)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=msg)
+
+
+async def pals_payout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed = get_allowed_chat_id()
+    if allowed is None:
+        return
+
+    chat_id = int(allowed)
+    db = get_firebase_client()
+    dt = now_kst()
+    today = kst_date_str(dt)
+
+    users = list(chat_ref(db, chat_id).collection("users").stream())
+    for udoc in users:
+        udata = udoc.to_dict() or {}
+        pal = udata.get("pal")
+        if not isinstance(pal, dict):
+            continue
+        stage = str(pal.get("stage") or "baby")
+        payout = int(PALS_PAYOUT_EXP.get(stage, 0))
+        if payout <= 0:
+            continue
+        last_payout_at = pal.get("last_payout_at")
+        if last_payout_at and last_payout_at > dt - timedelta(hours=24):
+            continue
+
+        total_exp = int(udata.get("total_exp", 0)) + payout
+        level = compute_level(total_exp)[0]
+
+        pal2 = dict(pal)
+        pal2["last_payout_at"] = dt
+
+        udoc.reference.set(
+            {
+                "total_exp": total_exp,
+                "current_level": level,
+                "pal": pal2,
+                "last_seen": dt,
+                "last_active_date": today,
+            },
+            merge=True,
+        )
+
+        display = udata.get("display") or (f"@{udata.get('username')}" if udata.get("username") else str(udoc.id))
+        msg = (
+            "💰 Pals 수익 알림\n\n"
+            f"{display} 님\n"
+            f"[{pals_display_title(stage, int(pal.get('type_id') or 1))}]가\n"
+            f"오늘의 EXP {payout}을 벌어왔습니다!"
+        )
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=msg)
+        except Exception:
+            continue
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1834,7 +2305,10 @@ def main() -> None:
     application.job_queue.run_daily(send_leaderboard, time=time(14, 0, tzinfo=kst))
     application.job_queue.run_daily(send_leaderboard, time=time(18, 0, tzinfo=kst))
     application.job_queue.run_daily(send_leaderboard, time=time(22, 0, tzinfo=kst))
- 
+
+    application.job_queue.run_repeating(pals_hatch_job, interval=60, first=10)
+    application.job_queue.run_repeating(pals_payout_job, interval=300, first=30)
+
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
