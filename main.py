@@ -942,16 +942,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                 caption=msg,
                             )
                         except Exception:
-                            await update.message.reply_text(f"{msg}\n\n(이미지 URL)\n{egg_url}")
+                            await update.message.reply_text(msg)
                     else:
-                        await update.message.reply_text(f"{msg}\n\n(이미지 URL)\n{egg_url}")
+                        await update.message.reply_text(msg)
             else:
                 base = get_pals_asset_base_url()
-                await update.message.reply_text(
-                    f"{msg}\n\nPals 이미지 URL이 설정되지 않았습니다.\n"
-                    "Railway 환경변수 `PALS_ASSET_BASE_URL`을 설정해 주세요.\n"
-                    f"현재값: {base or '(비어있음)'}"
-                )
+                await update.message.reply_text(msg)
             return
 
         if not isinstance(pal, dict):
@@ -998,16 +994,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             caption=msg,
                         )
                     except Exception:
-                        await update.message.reply_text(f"{msg}\n\n(이미지 URL)\n{img}")
+                        await update.message.reply_text(msg)
                 else:
-                    await update.message.reply_text(f"{msg}\n\n(이미지 URL)\n{img}")
+                    await update.message.reply_text(msg)
         else:
             base = get_pals_asset_base_url()
-            await update.message.reply_text(
-                f"{msg}\n\nPals 이미지 URL이 설정되지 않았습니다.\n"
-                "Railway 환경변수 `PALS_ASSET_BASE_URL`을 설정해 주세요.\n"
-                f"현재값: {base or '(비어있음)'}"
-            )
+            await update.message.reply_text(msg)
         return
 
     if text.strip() == "!베이스드몰":
