@@ -228,6 +228,64 @@ def rps_result(a_choice: str, b_choice: str) -> int:
     return -1
 
 
+SWORD_MAX_LEVEL = 20
+
+
+SWORD_TABLE: Dict[int, Dict[str, Any]] = {
+    0: {"name": "오래된 Based 나무 검", "cost": 0, "rate": 1.0, "sell": 5},
+    1: {"name": "실버 Based 검", "cost": 50, "rate": 0.70, "sell": 80},
+    2: {"name": "실버+ 검", "cost": 80, "rate": 0.60, "sell": 180},
+    3: {"name": "골드 Based 검", "cost": 120, "rate": 0.50, "sell": 350},
+    4: {"name": "골드+ 검", "cost": 180, "rate": 0.40, "sell": 650},
+    5: {"name": "플래티넘 Based 검", "cost": 250, "rate": 0.30, "sell": 1100},
+    6: {"name": "플래티넘+ 검", "cost": 350, "rate": 0.22, "sell": 1800},
+    7: {"name": "루비 Based 검", "cost": 500, "rate": 0.17, "sell": 3000},
+    8: {"name": "루비+ 검", "cost": 700, "rate": 0.13, "sell": 5000},
+    9: {"name": "사파이어 Based 검", "cost": 1000, "rate": 0.10, "sell": 8500},
+    10: {"name": "사파이어+ 검", "cost": 1400, "rate": 0.08, "sell": 15000},
+    11: {"name": "오닉스 Based 검", "cost": 2000, "rate": 0.06, "sell": 26000},
+    12: {"name": "오닉스+ 검", "cost": 2800, "rate": 0.045, "sell": 45000},
+    13: {"name": "블러드 Based 검", "cost": 3800, "rate": 0.03, "sell": 80000},
+    14: {"name": "블러드+ 검", "cost": 5200, "rate": 0.02, "sell": 150000},
+    15: {"name": "검은 왕의 검", "cost": 7000, "rate": 0.013, "sell": 280000},
+    16: {"name": "세계절단 검", "cost": 9000, "rate": 0.009, "sell": 500000},
+    17: {"name": "신의 시험 검", "cost": 12000, "rate": 0.006, "sell": 900000},
+    18: {"name": "멸망의 Based 검", "cost": 16000, "rate": 0.0035, "sell": 1600000},
+    19: {"name": "신화의 끝 검", "cost": 22000, "rate": 0.0015, "sell": 3000000},
+    20: {"name": "⚫ 절대자 Based 검", "cost": 30000, "rate": 0.0005, "sell": None},
+}
+
+
+def sword_state_from_udata(udata: Dict[str, Any]) -> Tuple[int, int]:
+    lvl = int(udata.get("sword_level", 0))
+    if lvl < 0:
+        lvl = 0
+    if lvl > SWORD_MAX_LEVEL:
+        lvl = SWORD_MAX_LEVEL
+    tickets = int(udata.get("defense_tickets", 0))
+    if tickets < 0:
+        tickets = 0
+    return lvl, tickets
+
+
+def sword_name(level: int) -> str:
+    return str(SWORD_TABLE.get(int(level), SWORD_TABLE[0])["name"])
+
+
+def sword_sell_price(level: int) -> Optional[int]:
+    return SWORD_TABLE.get(int(level), SWORD_TABLE[0]).get("sell")
+
+
+def sword_next_upgrade_info(level: int) -> Optional[Tuple[int, float, int, Optional[int], str]]:
+    nxt = int(level) + 1
+    if nxt > SWORD_MAX_LEVEL:
+        return None
+    row = SWORD_TABLE.get(nxt)
+    if not row:
+        return None
+    return nxt, float(row["rate"]), int(row["cost"]), row.get("sell"), str(row["name"])
+
+
 def kst_date_str(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
 
@@ -548,6 +606,133 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = update.message.text
+
+    if text.strip() in ("!인벤토리", "!inventory"):
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 `!인벤토리`를 입력해 주세요."
+            )
+            return
+        chat_id = int(update.effective_chat.id)
+        user_id = int(update.effective_user.id)
+        async with get_user_lock(chat_id, user_id):
+            db = get_firebase_client()
+            uref = user_ref(db, chat_id, user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            lvl, tickets = sword_state_from_udata(udata)
+            username = update.effective_user.username
+            display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+            await update.message.reply_text(
+                f"{display}님 현재소유 검 [{sword_name(lvl)}]이 있습니다.\n"
+                f"강화 방어티켓: {tickets}장"
+            )
+        return
+
+    if text.strip() == "!강화확률":
+        lines: List[str] = []
+        for lvl in range(1, SWORD_MAX_LEVEL + 1):
+            row = SWORD_TABLE.get(lvl)
+            if not row:
+                continue
+            rate = float(row["rate"]) * 100
+            sell = row.get("sell")
+            sell_txt = "판매 불가" if sell is None else f"{int(sell)}EXP"
+            lines.append(
+                f"{lvl}강: {row['name']} | 비용 {int(row['cost'])}EXP | 확률 {rate:.2f}% | 판매가 {sell_txt}"
+            )
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    if text.strip() == "!당근마켓":
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 `!당근마켓`을 입력해 주세요."
+            )
+            return
+        chat_id = int(update.effective_chat.id)
+        user_id = int(update.effective_user.id)
+        async with get_user_lock(chat_id, user_id):
+            db = get_firebase_client()
+            uref = user_ref(db, chat_id, user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            lvl, _ = sword_state_from_udata(udata)
+            price = sword_sell_price(lvl)
+            username = update.effective_user.username
+            display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+            if price is None:
+                await update.message.reply_text(
+                    f"{display}님 현재 소유한 [{sword_name(lvl)}]은(는) 판매 불가입니다."
+                )
+                return
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            text="판매하기",
+                            callback_data=f"sword_sell:{chat_id}:{user_id}:yes",
+                        ),
+                        InlineKeyboardButton(
+                            text="취소",
+                            callback_data=f"sword_sell:{chat_id}:{user_id}:no",
+                        ),
+                    ]
+                ]
+            )
+            await update.message.reply_text(
+                f"{display}님 현재 소유한 [{sword_name(lvl)}]을 파시겠습니까? 판매가격 {int(price)}EXP",
+                reply_markup=kb,
+            )
+        return
+
+    if text.strip() == "!오른":
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 `!오른`을 입력해 주세요."
+            )
+            return
+        chat_id = int(update.effective_chat.id)
+        user_id = int(update.effective_user.id)
+        async with get_user_lock(chat_id, user_id):
+            db = get_firebase_client()
+            uref = user_ref(db, chat_id, user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            lvl, tickets = sword_state_from_udata(udata)
+            nxt = sword_next_upgrade_info(lvl)
+            username = update.effective_user.username
+            display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+            if nxt is None:
+                await update.message.reply_text(f"{display}님은 이미 최종 검을 보유 중입니다.")
+                return
+            nxt_level, rate, cost, sell, nxt_name = nxt
+            sell_txt = "판매 불가" if sell is None else f"{int(sell)}EXP"
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            text="강화하기",
+                            callback_data=f"sword_enhance:{chat_id}:{user_id}:yes",
+                        ),
+                        InlineKeyboardButton(
+                            text="취소",
+                            callback_data=f"sword_enhance:{chat_id}:{user_id}:no",
+                        ),
+                    ]
+                ]
+            )
+            await update.message.reply_text(
+                f"{display}님의 [{sword_name(lvl)}]을 강화 하시겠습니까?\n"
+                f"강화확률 {rate*100:.2f}%, 강화비용 {int(cost)}exp\n"
+                f"강화 후 검[{nxt_name}] 당근마켓 시세 {sell_txt}\n"
+                f"보유 방어티켓: {tickets}장",
+                reply_markup=kb,
+            )
+        return
 
     if text.strip() == "!출첵":
         if is_anonymous_admin_message(update):
@@ -894,7 +1079,9 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
         chat_snap2 = cref.get()
         cdata2 = chat_snap2.to_dict() if chat_snap2.exists else {}
         counter = int(cdata2.get("blessing_counter", 0))
+        defense_counter = int(cdata2.get("defense_counter", 0))
         counter += 1
+        defense_counter += 1
         if counter >= 365:
             counter = 0
             total_exp2 = int(udata.get("total_exp", 0)) + 100
@@ -903,12 +1090,21 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
             await update.effective_chat.send_message(
                 f"띠링! 왈렛의 축복이 찾아왔습니다. {display}님이 100EXP를 획득하였습니다."
             )
+        if defense_counter >= 500:
+            defense_counter = 0
+            lvl0, tickets0 = sword_state_from_udata(udata)
+            tickets0 += 1
+            uref.set({"sword_level": lvl0, "defense_tickets": tickets0}, merge=True)
+            await update.effective_chat.send_message(
+                f"띠링! 누적채팅 500개를 달성하여 강화 방어티켓을 한장 부여합니다."
+            )
         cref.set(
             {
                 "chat_id": chat_id,
                 "title": chat_title,
                 "last_seen": dt,
                 "blessing_counter": counter,
+                "defense_counter": defense_counter,
             },
             merge=True,
         )
@@ -1211,6 +1407,106 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             else "EXP 이체: 없음"
         )
         await q.message.edit_text(f"결과: {winner_display} 승!\n{transfer_line}")
+        return
+
+    if data.startswith("sword_sell:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, uid, decision = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            return
+        if decision != "yes":
+            await q.message.edit_text("판매가 취소되었습니다.")
+            return
+
+        db = get_firebase_client()
+        target_user_id = int(uid)
+        async with get_user_lock(chat_id, target_user_id):
+            uref = user_ref(db, chat_id, target_user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            lvl, tickets = sword_state_from_udata(udata)
+            price = sword_sell_price(lvl)
+            if price is None:
+                await q.message.edit_text("현재 검은 판매 불가입니다.")
+                return
+            prev_total = int(udata.get("total_exp", 0))
+            new_total = prev_total + int(price)
+            new_level = compute_level(new_total)[0]
+            uref.set(
+                {
+                    "total_exp": new_total,
+                    "current_level": new_level,
+                    "sword_level": 0,
+                    "defense_tickets": tickets,
+                },
+                merge=True,
+            )
+        await q.message.edit_text(f"판매 완료! {int(price)}EXP를 획득했습니다.\n현재 검: [{sword_name(0)}]")
+        return
+
+    if data.startswith("sword_enhance:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, uid, decision = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            return
+        if decision != "yes":
+            await q.message.edit_text("강화가 취소되었습니다.")
+            return
+
+        db = get_firebase_client()
+        target_user_id = int(uid)
+        async with get_user_lock(chat_id, target_user_id):
+            uref = user_ref(db, chat_id, target_user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            lvl, tickets = sword_state_from_udata(udata)
+            nxt = sword_next_upgrade_info(lvl)
+            if nxt is None:
+                await q.message.edit_text("이미 최종 검입니다.")
+                return
+            nxt_level, rate, cost, _, nxt_name = nxt
+
+            total_exp = int(udata.get("total_exp", 0))
+            if total_exp < int(cost):
+                await q.message.edit_text(f"EXP가 부족합니다. (필요 {int(cost)}EXP)")
+                return
+
+            total_exp -= int(cost)
+            success = random.random() < float(rate)
+            if success:
+                lvl2 = nxt_level
+                msg = f"강화 성공! [{nxt_name}] 획득!"
+            else:
+                if tickets > 0:
+                    tickets -= 1
+                    lvl2 = lvl
+                    msg = "강화 실패! 방어티켓 1장을 사용하여 검이 복구되었습니다."
+                else:
+                    lvl2 = 0
+                    msg = f"강화 실패! 검이 파괴되어 [{sword_name(0)}]로 돌아갑니다."
+
+            new_level = compute_level(total_exp)[0]
+            uref.set(
+                {
+                    "total_exp": total_exp,
+                    "current_level": new_level,
+                    "sword_level": lvl2,
+                    "defense_tickets": tickets,
+                },
+                merge=True,
+            )
+
+        await q.message.edit_text(
+            f"{msg}\n현재 검: [{sword_name(lvl2)}]\n남은 방어티켓: {tickets}장"
+        )
         return
 
 
