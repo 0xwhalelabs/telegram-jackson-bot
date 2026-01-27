@@ -35,6 +35,18 @@ _YACHA_DUELS: Dict[int, Dict[str, Any]] = {}
 _YACHA_CHAT_LOCKS: Dict[int, asyncio.Lock] = {}
 
 
+_CHAT_LOCKS: Dict[int, asyncio.Lock] = {}
+
+
+def get_chat_lock(chat_id: int) -> asyncio.Lock:
+    key = int(chat_id)
+    lock = _CHAT_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _CHAT_LOCKS[key] = lock
+    return lock
+
+
 def get_yacha_chat_lock(chat_id: int) -> asyncio.Lock:
     key = int(chat_id)
     lock = _YACHA_CHAT_LOCKS.get(key)
@@ -537,6 +549,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     text = update.message.text
 
+    if text.strip() == "!출첵":
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 `!출첵`을 입력해 주세요."
+            )
+            return
+
+        chat_id = int(update.effective_chat.id)
+        user_id = int(update.effective_user.id)
+        async with get_user_lock(chat_id, user_id):
+            db = get_firebase_client()
+            dt = now_kst()
+            today = kst_date_str(dt)
+            uref = user_ref(db, chat_id, user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+
+            if udata.get("checkin_date") == today:
+                await update.message.reply_text("오늘은 이미 출첵하셨습니다.")
+                return
+
+            username = update.effective_user.username
+            display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+
+            prev_total = int(udata.get("total_exp", 0))
+            new_total = prev_total + 100
+            new_level = compute_level(new_total)[0]
+
+            uref.set(
+                {
+                    "user_id": user_id,
+                    "username": username or None,
+                    "display": display,
+                    "total_exp": new_total,
+                    "current_level": new_level,
+                    "checkin_date": today,
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+
+        await update.message.reply_text("출첵이 완료되었습니다. 도장 쾅쾅!")
+        return
+
     if text.strip() in ("!점메추", "!저메추"):
         lunch_menu = [
             "김치찌개",
@@ -831,6 +889,29 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
 
     cdata = chat_snap.to_dict() if chat_snap.exists else {}
     udata = user_snap.to_dict() if user_snap.exists else {}
+
+    async with get_chat_lock(int(chat_id)):
+        chat_snap2 = cref.get()
+        cdata2 = chat_snap2.to_dict() if chat_snap2.exists else {}
+        counter = int(cdata2.get("blessing_counter", 0))
+        counter += 1
+        if counter >= 365:
+            counter = 0
+            total_exp2 = int(udata.get("total_exp", 0)) + 100
+            level2 = compute_level(total_exp2)[0]
+            uref.set({"total_exp": total_exp2, "current_level": level2}, merge=True)
+            await update.effective_chat.send_message(
+                f"띠링! 왈렛의 축복이 찾아왔습니다. {display}님이 100EXP를 획득하였습니다."
+            )
+        cref.set(
+            {
+                "chat_id": chat_id,
+                "title": chat_title,
+                "last_seen": dt,
+                "blessing_counter": counter,
+            },
+            merge=True,
+        )
 
     cur_text = (text or "").strip()
 
