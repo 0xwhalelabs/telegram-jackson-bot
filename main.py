@@ -1466,12 +1466,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 {
                     "total_exp": new_total,
                     "current_level": new_level,
-                    "sword_level": 0,
+                    "sword_level": SWORD_NONE_LEVEL,
                     "defense_tickets": tickets,
                 },
                 merge=True,
             )
-        await q.message.edit_text(f"판매 완료! {int(price)}EXP를 획득했습니다.\n현재 검: [{sword_name(0)}]")
+        await q.message.edit_text(f"판매 완료! {int(price)}EXP를 획득했습니다.\n현재 검: 없음")
         return
 
     if data.startswith("sword_enhance:"):
