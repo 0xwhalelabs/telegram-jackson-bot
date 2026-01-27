@@ -645,6 +645,83 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     )
                     return
 
+    if text.strip() == "!상납금":
+        if not is_owner(update):
+            await update.message.reply_text("권한이 없습니다.")
+            return
+        context.chat_data["tribute_mode"] = {"step": "await_user_id"}
+        await update.message.reply_text("어떤유저에게 싸바싸바를 하시겠습니까?\n유저아이디를 치면(예:XXX)")
+        return
+
+    tribute = context.chat_data.get("tribute_mode")
+    if is_owner(update) and tribute and isinstance(tribute, dict):
+        step = str(tribute.get("step") or "")
+        if step == "await_user_id":
+            t = text.strip()
+            try:
+                target_user_id = int(t)
+            except ValueError:
+                await update.message.reply_text("유저아이디는 숫자로 입력해주세요.")
+                return
+            tribute["step"] = "await_amount"
+            tribute["target_user_id"] = target_user_id
+            context.chat_data["tribute_mode"] = tribute
+            await update.message.reply_text("얼마의 상납금을 바치시겠습니까?")
+            return
+
+        if step == "await_amount":
+            t = text.strip()
+            try:
+                amount = int(t)
+            except ValueError:
+                await update.message.reply_text("상납금은 숫자로 입력해주세요.")
+                return
+            if amount <= 0:
+                await update.message.reply_text("상납금은 1 이상의 숫자로 입력해주세요.")
+                return
+
+            chat_id = int(update.effective_chat.id)
+            target_user_id = int(tribute.get("target_user_id") or 0)
+            if target_user_id <= 0:
+                context.chat_data.pop("tribute_mode", None)
+                await update.message.reply_text("대상 유저 정보가 유효하지 않습니다. 다시 `!상납금`부터 진행해주세요.")
+                return
+
+            db = get_firebase_client()
+            dt = now_kst()
+            async with get_user_lock(chat_id, target_user_id):
+                uref = user_ref(db, chat_id, target_user_id)
+                snap = uref.get()
+                udata = snap.to_dict() if snap.exists else {}
+
+                prev_total = int(udata.get("total_exp", 0))
+                new_total = prev_total + int(amount)
+                new_level = compute_level(new_total)[0]
+
+                target_username = udata.get("username")
+                target_display = udata.get("display")
+                if not target_display:
+                    target_display = f"@{target_username}" if target_username else str(target_user_id)
+
+                uref.set(
+                    {
+                        "user_id": target_user_id,
+                        "username": target_username or None,
+                        "display": target_display,
+                        "total_exp": new_total,
+                        "current_level": new_level,
+                        "last_seen": dt,
+                    },
+                    merge=True,
+                )
+
+            context.chat_data.pop("tribute_mode", None)
+            owner_name = update.effective_user.full_name if update.effective_user else "방장"
+            await update.effective_chat.send_message(
+                f"{owner_name}님이 비열하게도 {target_display}님에게 {amount}EXP를 싸바싸바했습니다."
+            )
+            return
+
     if text.strip() == "!타노스":
         if not is_owner(update):
             await update.message.reply_text("권한이 없습니다.")
