@@ -230,6 +230,8 @@ def rps_result(a_choice: str, b_choice: str) -> int:
 
 SWORD_MAX_LEVEL = 20
 SWORD_NONE_LEVEL = -1
+BASED_MALL_SWORD_LEVEL = 0
+BASED_MALL_PRICE_EXP = 100
 
 
 SWORD_TABLE: Dict[int, Dict[str, Any]] = {
@@ -613,6 +615,47 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = update.message.text
+
+    if text.strip() == "!베이스드몰":
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 `!베이스드몰`을 입력해 주세요."
+            )
+            return
+
+        chat_id = int(update.effective_chat.id)
+        user_id = int(update.effective_user.id)
+        async with get_user_lock(chat_id, user_id):
+            db = get_firebase_client()
+            uref = user_ref(db, chat_id, user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            lvl, _ = sword_state_from_udata(udata)
+            if lvl != SWORD_NONE_LEVEL:
+                await update.message.reply_text("이미 검을 보유 중입니다. (구매는 검이 없을 때만 가능합니다)")
+                return
+
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="네",
+                        callback_data=f"based_mall_buy:{chat_id}:{user_id}:yes",
+                    ),
+                    InlineKeyboardButton(
+                        text="아니오",
+                        callback_data=f"based_mall_buy:{chat_id}:{user_id}:no",
+                    ),
+                ]
+            ]
+        )
+        await update.message.reply_text(
+            "검을 구매하시겠습니까? IMF, FTX, 루나, 박상기의 난을 겪은 주인장은 검 당근마켓 판매가격의 20배인 "
+            f"{BASED_MALL_PRICE_EXP}EXP에 검을 팔고있습니다.",
+            reply_markup=kb,
+        )
+        return
 
     if text.strip() in ("!인벤토리", "!inventory"):
         if is_anonymous_admin_message(update):
@@ -1426,6 +1469,56 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             else "EXP 이체: 없음"
         )
         await q.message.edit_text(f"결과: {winner_display} 승!\n{transfer_line}")
+        return
+
+    if data.startswith("based_mall_buy:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, uid, decision = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("명령어를 친 본인만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+        if decision != "yes":
+            await q.message.edit_text("구매가 취소되었습니다.")
+            return
+
+        db = get_firebase_client()
+        target_user_id = int(uid)
+        async with get_user_lock(chat_id, target_user_id):
+            uref = user_ref(db, chat_id, target_user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            lvl, tickets = sword_state_from_udata(udata)
+            if lvl != SWORD_NONE_LEVEL:
+                await q.message.edit_text("이미 검을 보유 중입니다.")
+                return
+
+            total_exp = int(udata.get("total_exp", 0))
+            if total_exp < BASED_MALL_PRICE_EXP:
+                await q.message.edit_text(f"EXP가 부족합니다. (필요 {BASED_MALL_PRICE_EXP}EXP)")
+                return
+
+            total_exp -= BASED_MALL_PRICE_EXP
+            new_level = compute_level(total_exp)[0]
+            uref.set(
+                {
+                    "total_exp": total_exp,
+                    "current_level": new_level,
+                    "sword_level": BASED_MALL_SWORD_LEVEL,
+                    "defense_tickets": tickets,
+                },
+                merge=True,
+            )
+
+        await q.message.edit_text(
+            f"구매 완료! [{sword_name(BASED_MALL_SWORD_LEVEL)}] 지급 완료. (-{BASED_MALL_PRICE_EXP}EXP)"
+        )
         return
 
     if data.startswith("sword_sell:"):
