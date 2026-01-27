@@ -231,7 +231,7 @@ def rps_result(a_choice: str, b_choice: str) -> int:
 
 
 PALS_EGG_PRICE_EXP = 100
-PALS_FEED_PRICE_EXP = 5
+PALS_FEED_PRICE_EXP = 50
 
 PALS_TYPES: List[str] = [
     "블루",
@@ -737,7 +737,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "\n"
             "[Based Pals]\n"
             "- !알구매: 100EXP로 알 구매 (1시간 후 부화)\n"
-            "- !먹이: 5EXP로 성장치 +5\n"
+            "- !먹이: 50EXP로 성장치 +50\n"
             "- !마이팔: 내 Pals/알 상태 확인\n"
             "\n"
             "[검 키우기]\n"
@@ -856,7 +856,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             stage = str(pal.get("stage") or "baby")
             type_id = int(pal.get("type_id") or 1)
             growth = int(pal.get("growth") or 0)
-            growth += 5
+            growth += 50
             total_exp -= PALS_FEED_PRICE_EXP
 
             next_stage = stage
@@ -889,7 +889,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(
             f"{display} 님\n"
             f"먹이를 주었습니다! (-{PALS_FEED_PRICE_EXP}EXP)\n"
-            f"성장치 +5 (현재 {growth})"
+            f"성장치 +50 (현재 {growth})"
         )
 
         if next_stage != stage:
