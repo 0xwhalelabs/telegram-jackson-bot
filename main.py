@@ -229,6 +229,7 @@ def rps_result(a_choice: str, b_choice: str) -> int:
 
 
 SWORD_MAX_LEVEL = 20
+SWORD_NONE_LEVEL = -1
 
 
 SWORD_TABLE: Dict[int, Dict[str, Any]] = {
@@ -258,8 +259,8 @@ SWORD_TABLE: Dict[int, Dict[str, Any]] = {
 
 def sword_state_from_udata(udata: Dict[str, Any]) -> Tuple[int, int]:
     lvl = int(udata.get("sword_level", 0))
-    if lvl < 0:
-        lvl = 0
+    if lvl < SWORD_NONE_LEVEL:
+        lvl = SWORD_NONE_LEVEL
     if lvl > SWORD_MAX_LEVEL:
         lvl = SWORD_MAX_LEVEL
     tickets = int(udata.get("defense_tickets", 0))
@@ -269,14 +270,20 @@ def sword_state_from_udata(udata: Dict[str, Any]) -> Tuple[int, int]:
 
 
 def sword_name(level: int) -> str:
+    if int(level) == SWORD_NONE_LEVEL:
+        return "없음"
     return str(SWORD_TABLE.get(int(level), SWORD_TABLE[0])["name"])
 
 
 def sword_sell_price(level: int) -> Optional[int]:
+    if int(level) == SWORD_NONE_LEVEL:
+        return None
     return SWORD_TABLE.get(int(level), SWORD_TABLE[0]).get("sell")
 
 
 def sword_next_upgrade_info(level: int) -> Optional[Tuple[int, float, int, Optional[int], str]]:
+    if int(level) == SWORD_NONE_LEVEL:
+        return None
     nxt = int(level) + 1
     if nxt > SWORD_MAX_LEVEL:
         return None
@@ -624,10 +631,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             lvl, tickets = sword_state_from_udata(udata)
             username = update.effective_user.username
             display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
-            await update.message.reply_text(
-                f"{display}님 현재소유 검 [{sword_name(lvl)}]이 있습니다.\n"
-                f"강화 방어티켓: {tickets}장"
-            )
+            if lvl == SWORD_NONE_LEVEL:
+                await update.message.reply_text(
+                    f"{display}님 현재 검이 없습니다.\n"
+                    f"강화 방어티켓: {tickets}장"
+                )
+            else:
+                await update.message.reply_text(
+                    f"{display}님 현재소유 검 [{sword_name(lvl)}]이 있습니다.\n"
+                    f"강화 방어티켓: {tickets}장"
+                )
         return
 
     if text.strip() == "!강화확률":
@@ -663,6 +676,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             price = sword_sell_price(lvl)
             username = update.effective_user.username
             display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+            if lvl == SWORD_NONE_LEVEL:
+                await update.message.reply_text(f"{display}님 현재 검이 없습니다.")
+                return
             if price is None:
                 await update.message.reply_text(
                     f"{display}님 현재 소유한 [{sword_name(lvl)}]은(는) 판매 불가입니다."
@@ -706,6 +722,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             nxt = sword_next_upgrade_info(lvl)
             username = update.effective_user.username
             display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+            if lvl == SWORD_NONE_LEVEL:
+                await update.message.reply_text(f"{display}님 현재 검이 없습니다.")
+                return
             if nxt is None:
                 await update.message.reply_text(f"{display}님은 이미 최종 검을 보유 중입니다.")
                 return
@@ -1417,6 +1436,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if int(cid) != chat_id:
             return
         if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("명령어를 친 본인만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
             return
         if decision != "yes":
             await q.message.edit_text("판매가 취소되었습니다.")
@@ -1429,6 +1452,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             snap = uref.get()
             udata = snap.to_dict() if snap.exists else {}
             lvl, tickets = sword_state_from_udata(udata)
+            if lvl == SWORD_NONE_LEVEL:
+                await q.message.edit_text("현재 검이 없습니다.")
+                return
             price = sword_sell_price(lvl)
             if price is None:
                 await q.message.edit_text("현재 검은 판매 불가입니다.")
@@ -1456,6 +1482,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if int(cid) != chat_id:
             return
         if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("명령어를 친 본인만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
             return
         if decision != "yes":
             await q.message.edit_text("강화가 취소되었습니다.")
@@ -1468,6 +1498,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             snap = uref.get()
             udata = snap.to_dict() if snap.exists else {}
             lvl, tickets = sword_state_from_udata(udata)
+            if lvl == SWORD_NONE_LEVEL:
+                await q.message.edit_text("현재 검이 없습니다.")
+                return
             nxt = sword_next_upgrade_info(lvl)
             if nxt is None:
                 await q.message.edit_text("이미 최종 검입니다.")
@@ -1490,8 +1523,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     lvl2 = lvl
                     msg = "강화 실패! 방어티켓 1장을 사용하여 검이 복구되었습니다."
                 else:
-                    lvl2 = 0
-                    msg = f"강화 실패! 검이 파괴되어 [{sword_name(0)}]로 돌아갑니다."
+                    lvl2 = SWORD_NONE_LEVEL
+                    msg = "강화 실패! 검이 파괴되어 사라졌습니다."
 
             new_level = compute_level(total_exp)[0]
             uref.set(
@@ -1504,9 +1537,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 merge=True,
             )
 
-        await q.message.edit_text(
-            f"{msg}\n현재 검: [{sword_name(lvl2)}]\n남은 방어티켓: {tickets}장"
-        )
+        if lvl2 == SWORD_NONE_LEVEL:
+            await q.message.edit_text(f"{msg}\n남은 방어티켓: {tickets}장")
+        else:
+            await q.message.edit_text(
+                f"{msg}\n현재 검: [{sword_name(lvl2)}]\n남은 방어티켓: {tickets}장"
+            )
         return
 
 
