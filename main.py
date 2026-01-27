@@ -11,15 +11,24 @@ from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from firebase_admin import credentials, firestore
 import firebase_admin
-from telegram import ChatPermissions, Update
+from telegram import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 
 load_dotenv()
 
 
 _USER_LOCKS: Dict[Tuple[int, int], asyncio.Lock] = {}
+
+
+_YACHA_DUELS: Dict[int, Dict[str, Any]] = {}
 
 
 def get_user_lock(chat_id: int, user_id: int) -> asyncio.Lock:
@@ -29,6 +38,28 @@ def get_user_lock(chat_id: int, user_id: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         _USER_LOCKS[key] = lock
     return lock
+
+
+async def acquire_two_user_locks(chat_id: int, user_a: int, user_b: int) -> Tuple[asyncio.Lock, asyncio.Lock]:
+    a = int(user_a)
+    b = int(user_b)
+    first, second = (a, b) if a <= b else (b, a)
+    lock1 = get_user_lock(chat_id, first)
+    lock2 = get_user_lock(chat_id, second)
+    await lock1.acquire()
+    try:
+        await lock2.acquire()
+    except Exception:
+        lock1.release()
+        raise
+    return lock1, lock2
+
+
+def release_two_user_locks(lock1: asyncio.Lock, lock2: asyncio.Lock) -> None:
+    try:
+        lock2.release()
+    finally:
+        lock1.release()
 
 
 KST_TZ = "Asia/Seoul"
@@ -127,6 +158,49 @@ def chat_ref(db: firestore.Client, chat_id: int):
 
 def user_ref(db: firestore.Client, chat_id: int, user_id: int):
     return chat_ref(db, chat_id).collection("users").document(str(user_id))
+
+
+def is_username_token(text: str) -> bool:
+    t = (text or "").strip()
+    if not t.startswith("@"):
+        return False
+    if len(t) < 2:
+        return False
+    if " " in t:
+        return False
+    return True
+
+
+def parse_username_token(text: str) -> str:
+    t = (text or "").strip()
+    if t.startswith("@"): 
+        t = t[1:]
+    return t
+
+
+def yacha_duel_key(chat_id: int) -> int:
+    return int(chat_id)
+
+
+def get_active_duel(chat_id: int) -> Optional[Dict[str, Any]]:
+    return _YACHA_DUELS.get(yacha_duel_key(chat_id))
+
+
+def set_active_duel(chat_id: int, duel: Optional[Dict[str, Any]]) -> None:
+    key = yacha_duel_key(chat_id)
+    if duel is None:
+        _YACHA_DUELS.pop(key, None)
+    else:
+        _YACHA_DUELS[key] = duel
+
+
+def rps_result(a_choice: str, b_choice: str) -> int:
+    beats = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
+    if a_choice == b_choice:
+        return 0
+    if beats.get(a_choice) == b_choice:
+        return 1
+    return -1
 
 
 def kst_date_str(dt: datetime) -> str:
@@ -310,8 +384,8 @@ async def handle_exp_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     db = get_firebase_client()
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
+    chat_id = int(update.effective_chat.id)
+    user_id = int(update.effective_user.id)
 
     async with get_user_lock(chat_id, user_id):
         username = update.effective_user.username
@@ -349,6 +423,22 @@ async def handle_exp_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         level, progress, need = compute_level(total_exp)
         remaining = need - progress
 
+        users = list(chat_ref(db, chat_id).collection("users").stream())
+        rows: List[Tuple[int, int, int]] = []
+        for d in users:
+            u = d.to_dict() or {}
+            tid = int(u.get("user_id", int(d.id)))
+            te = int(u.get("total_exp", 0))
+            tl = int(u.get("current_level", compute_level(te)[0]))
+            rows.append((tid, tl, te))
+        rows.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        rank = 0
+        for i, (tid, _, _) in enumerate(rows, start=1):
+            if tid == user_id:
+                rank = i
+                break
+        total_users = len(rows)
+
     result = {
         "ok": True,
         "level": level,
@@ -363,11 +453,13 @@ async def handle_exp_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(result["msg"])
         return
 
+    extra_rank = f"\n현재 순위: {rank}/{total_users}" if total_users > 0 else ""
     await update.message.reply_text(
         f"{display}\n"
         f"현재 레벨: Lv.{result['level']}\n"
         f"현재 EXP: {result['total_exp']}\n"
         f"다음 레벨까지 남은 EXP: {result['remaining']}"
+        f"{extra_rank}"
     )
 
 
@@ -431,6 +523,95 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = update.message.text
+
+    if text.strip() == "!야차뜨자":
+        if context.chat_data.get("yacha_pending"):
+            await update.message.reply_text("이미 야차 상대 선택 중입니다. 상대 @username을 입력해주세요.")
+            return
+
+        if get_active_duel(int(update.effective_chat.id)) is not None:
+            await update.message.reply_text("현재 진행 중인 야차가 있습니다.")
+            return
+
+        db = get_firebase_client()
+        dt = now_kst()
+        uref = user_ref(db, int(update.effective_chat.id), int(update.effective_user.id))
+        snap = uref.get()
+        data = snap.to_dict() if snap.exists else {}
+        uses: List[Dict[str, Any]] = list(data.get("yacha_uses", []))
+        cutoff = dt - timedelta(hours=24)
+        uses = [x for x in uses if x.get("ts") and x["ts"] >= cutoff]
+        if len(uses) >= 2:
+            await update.message.reply_text("야차는 24시간 동안 2번만 사용할 수 있습니다.")
+            return
+
+        uses.append({"ts": dt})
+        uref.set({"yacha_uses": uses, "last_seen": dt}, merge=True)
+
+        context.chat_data["yacha_pending"] = {
+            "challenger_id": int(update.effective_user.id),
+            "started_at": dt,
+        }
+        await update.message.reply_text("야차를 뜨실 악당을 선택해주세요.")
+        return
+
+    pending = context.chat_data.get("yacha_pending")
+    if pending and isinstance(pending, dict):
+        if int(pending.get("challenger_id", 0)) == int(update.effective_user.id) and is_username_token(text.strip()):
+            target_username = parse_username_token(text.strip())
+            db = get_firebase_client()
+            chat_id = int(update.effective_chat.id)
+            users_coll = chat_ref(db, chat_id).collection("users")
+            docs = list(users_coll.where("username", "==", target_username).limit(1).stream())
+            if not docs:
+                docs = list(users_coll.where("username", "==", target_username.lower()).limit(1).stream())
+            if not docs:
+                await update.message.reply_text(f"@{target_username} 유저를 찾을 수 없습니다.")
+                return
+
+            target_doc = docs[0]
+            target_data = target_doc.to_dict() or {}
+            opponent_id = int(target_data.get("user_id", int(target_doc.id)))
+            if opponent_id == int(update.effective_user.id):
+                await update.message.reply_text("본인은 상대가 될 수 없습니다.")
+                return
+
+            if get_active_duel(chat_id) is not None:
+                await update.message.reply_text("현재 진행 중인 야차가 있습니다.")
+                return
+
+            duel = {
+                "chat_id": chat_id,
+                "challenger_id": int(update.effective_user.id),
+                "challenger_display": f"@{update.effective_user.username}" if update.effective_user.username else str(update.effective_user.id),
+                "opponent_id": opponent_id,
+                "opponent_username": target_username,
+                "accepted": False,
+                "choices": {},
+                "created_at": now_kst(),
+            }
+            set_active_duel(chat_id, duel)
+            context.chat_data.pop("yacha_pending", None)
+
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            text="네",
+                            callback_data=f"yacha_accept:{chat_id}:{duel['challenger_id']}:{duel['opponent_id']}:yes",
+                        ),
+                        InlineKeyboardButton(
+                            text="아니오",
+                            callback_data=f"yacha_accept:{chat_id}:{duel['challenger_id']}:{duel['opponent_id']}:no",
+                        ),
+                    ]
+                ]
+            )
+            await update.effective_chat.send_message(
+                f"@{target_username}님 야차를 수락하시겠습니까?",
+                reply_markup=kb,
+            )
+            return
 
     if text.strip() == "!타노스":
         if not is_owner(update):
@@ -722,6 +903,154 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
         )
 
 
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query is None:
+        return
+
+    q = update.callback_query
+    data = (q.data or "").strip()
+    await q.answer()
+
+    if q.message is None or q.message.chat is None:
+        return
+
+    chat_id = int(q.message.chat.id)
+    allowed = get_allowed_chat_id()
+    if allowed is not None and int(allowed) != chat_id:
+        return
+
+    if data.startswith("yacha_accept:"):
+        parts = data.split(":")
+        if len(parts) != 6:
+            return
+        _, _, cid, challenger_id, opponent_id, decision = parts
+        if int(cid) != chat_id:
+            return
+        duel = get_active_duel(chat_id)
+        if duel is None:
+            return
+        if int(duel.get("challenger_id")) != int(challenger_id) or int(duel.get("opponent_id")) != int(opponent_id):
+            return
+        if q.from_user is None or int(q.from_user.id) != int(opponent_id):
+            return
+
+        if decision == "no":
+            set_active_duel(chat_id, None)
+            await q.message.edit_text("야차가 거절되었습니다.")
+            return
+
+        duel["accepted"] = True
+        set_active_duel(chat_id, duel)
+
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="가위",
+                        callback_data=f"yacha_rps:{chat_id}:{duel['challenger_id']}:{duel['opponent_id']}:scissors",
+                    ),
+                    InlineKeyboardButton(
+                        text="바위",
+                        callback_data=f"yacha_rps:{chat_id}:{duel['challenger_id']}:{duel['opponent_id']}:rock",
+                    ),
+                    InlineKeyboardButton(
+                        text="보",
+                        callback_data=f"yacha_rps:{chat_id}:{duel['challenger_id']}:{duel['opponent_id']}:paper",
+                    ),
+                ]
+            ]
+        )
+        await q.message.edit_text(
+            "가위 바위 보를 선택하세요. (두 유저의 클릭만 유효)",
+            reply_markup=kb,
+        )
+        return
+
+    if data.startswith("yacha_rps:"):
+        parts = data.split(":")
+        if len(parts) != 6:
+            return
+        _, _, cid, challenger_id, opponent_id, choice = parts
+        if int(cid) != chat_id:
+            return
+        duel = get_active_duel(chat_id)
+        if duel is None or not duel.get("accepted"):
+            return
+        if int(duel.get("challenger_id")) != int(challenger_id) or int(duel.get("opponent_id")) != int(opponent_id):
+            return
+
+        uid = int(q.from_user.id) if q.from_user else 0
+        if uid not in (int(challenger_id), int(opponent_id)):
+            return
+        if choice not in ("rock", "paper", "scissors"):
+            return
+
+        choices = duel.get("choices") or {}
+        if not isinstance(choices, dict):
+            choices = {}
+        choices[str(uid)] = choice
+        duel["choices"] = choices
+        set_active_duel(chat_id, duel)
+
+        if len(choices.keys()) < 2:
+            await q.message.edit_text("한 명이 선택했습니다. 상대의 선택을 기다리는 중...", reply_markup=q.message.reply_markup)
+            return
+
+        a_id = int(challenger_id)
+        b_id = int(opponent_id)
+        a_choice = str(choices.get(str(a_id)))
+        b_choice = str(choices.get(str(b_id)))
+
+        await q.message.edit_text("3...")
+        await asyncio.sleep(1)
+        await q.message.edit_text("2...")
+        await asyncio.sleep(1)
+        await q.message.edit_text("1...")
+        await asyncio.sleep(1)
+
+        res = rps_result(a_choice, b_choice)
+        if res == 0:
+            set_active_duel(chat_id, None)
+            await q.message.edit_text("비겼습니다. 야차 종료!")
+            return
+
+        winner_id = a_id if res == 1 else b_id
+        loser_id = b_id if res == 1 else a_id
+
+        challenger_display = str(duel.get("challenger_display") or str(a_id))
+        opponent_display = f"@{str(duel.get('opponent_username') or '')}" if duel.get("opponent_username") else str(b_id)
+        winner_display = challenger_display if winner_id == a_id else opponent_display
+        loser_display = opponent_display if winner_id == a_id else challenger_display
+
+        db = get_firebase_client()
+        lock1, lock2 = await acquire_two_user_locks(chat_id, winner_id, loser_id)
+        try:
+            wref = user_ref(db, chat_id, winner_id)
+            lref = user_ref(db, chat_id, loser_id)
+            wsnap = wref.get()
+            lsnap = lref.get()
+            wdata = wsnap.to_dict() if wsnap.exists else {}
+            ldata = lsnap.to_dict() if lsnap.exists else {}
+            wexp = int(wdata.get("total_exp", 0))
+            lexp = int(ldata.get("total_exp", 0))
+            delta = min(50, max(0, lexp))
+            wexp2 = wexp + delta
+            lexp2 = max(0, lexp - delta)
+            wlevel2 = compute_level(wexp2)[0]
+            llevel2 = compute_level(lexp2)[0]
+            wref.set({"total_exp": wexp2, "current_level": wlevel2}, merge=True)
+            lref.set({"total_exp": lexp2, "current_level": llevel2}, merge=True)
+        finally:
+            release_two_user_locks(lock1, lock2)
+
+        set_active_duel(chat_id, None)
+        await q.message.edit_text(
+            f"결과: {winner_display} 승!\n"
+            f"EXP 이체: {loser_display} → {winner_display} ({delta} EXP)"
+        )
+        return
+
+
 async def send_fever_start(context: ContextTypes.DEFAULT_TYPE) -> None:
     db = get_firebase_client()
     dt = now_kst()
@@ -883,8 +1212,9 @@ def main() -> None:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
  
     application = Application.builder().token(token).build()
- 
+
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(handle_callback))
  
     from zoneinfo import ZoneInfo
  
