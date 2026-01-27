@@ -31,6 +31,18 @@ _USER_LOCKS: Dict[Tuple[int, int], asyncio.Lock] = {}
 _YACHA_DUELS: Dict[int, Dict[str, Any]] = {}
 
 
+_YACHA_CHAT_LOCKS: Dict[int, asyncio.Lock] = {}
+
+
+def get_yacha_chat_lock(chat_id: int) -> asyncio.Lock:
+    key = int(chat_id)
+    lock = _YACHA_CHAT_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _YACHA_CHAT_LOCKS[key] = lock
+    return lock
+
+
 def get_user_lock(chat_id: int, user_id: int) -> asyncio.Lock:
     key = (int(chat_id), int(user_id))
     lock = _USER_LOCKS.get(key)
@@ -524,94 +536,112 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     text = update.message.text
 
-    if text.strip() == "!야차뜨자":
-        if context.chat_data.get("yacha_pending"):
-            await update.message.reply_text("이미 야차 상대 선택 중입니다. 상대 @username을 입력해주세요.")
-            return
+    if text.strip() == "!야차뜨자" or is_username_token(text.strip()):
+        chat_id_for_lock = int(update.effective_chat.id)
+        async with get_yacha_chat_lock(chat_id_for_lock):
+            dt_now = now_kst()
 
-        if get_active_duel(int(update.effective_chat.id)) is not None:
-            await update.message.reply_text("현재 진행 중인 야차가 있습니다.")
-            return
+            pending0 = context.chat_data.get("yacha_pending")
+            if pending0 and isinstance(pending0, dict):
+                started_at0 = pending0.get("started_at")
+                if started_at0 and started_at0 < dt_now - timedelta(minutes=10):
+                    context.chat_data.pop("yacha_pending", None)
 
-        db = get_firebase_client()
-        dt = now_kst()
-        uref = user_ref(db, int(update.effective_chat.id), int(update.effective_user.id))
-        snap = uref.get()
-        data = snap.to_dict() if snap.exists else {}
-        uses: List[Dict[str, Any]] = list(data.get("yacha_uses", []))
-        cutoff = dt - timedelta(hours=24)
-        uses = [x for x in uses if x.get("ts") and x["ts"] >= cutoff]
-        if len(uses) >= 2:
-            await update.message.reply_text("야차는 24시간 동안 2번만 사용할 수 있습니다.")
-            return
+            duel0 = get_active_duel(chat_id_for_lock)
+            if duel0 and isinstance(duel0, dict):
+                created_at0 = duel0.get("created_at")
+                accepted0 = bool(duel0.get("accepted"))
+                timeout = timedelta(minutes=30) if accepted0 else timedelta(minutes=10)
+                if created_at0 and created_at0 < dt_now - timeout:
+                    set_active_duel(chat_id_for_lock, None)
 
-        uses.append({"ts": dt})
-        uref.set({"yacha_uses": uses, "last_seen": dt}, merge=True)
+            if text.strip() == "!야차뜨자":
+                if context.chat_data.get("yacha_pending"):
+                    await update.message.reply_text("이미 야차 상대 선택 중입니다. 상대 @username을 입력해주세요.")
+                    return
 
-        context.chat_data["yacha_pending"] = {
-            "challenger_id": int(update.effective_user.id),
-            "started_at": dt,
-        }
-        await update.message.reply_text("야차를 뜨실 악당을 선택해주세요.")
-        return
+                if get_active_duel(chat_id_for_lock) is not None:
+                    await update.message.reply_text("현재 진행 중인 야차가 있습니다.")
+                    return
 
-    pending = context.chat_data.get("yacha_pending")
-    if pending and isinstance(pending, dict):
-        if int(pending.get("challenger_id", 0)) == int(update.effective_user.id) and is_username_token(text.strip()):
-            target_username = parse_username_token(text.strip())
-            db = get_firebase_client()
-            chat_id = int(update.effective_chat.id)
-            users_coll = chat_ref(db, chat_id).collection("users")
-            docs = list(users_coll.where("username", "==", target_username).limit(1).stream())
-            if not docs:
-                docs = list(users_coll.where("username", "==", target_username.lower()).limit(1).stream())
-            if not docs:
-                await update.message.reply_text(f"@{target_username} 유저를 찾을 수 없습니다.")
+                db = get_firebase_client()
+                dt = dt_now
+                uref = user_ref(db, chat_id_for_lock, int(update.effective_user.id))
+                snap = uref.get()
+                data = snap.to_dict() if snap.exists else {}
+                uses: List[Dict[str, Any]] = list(data.get("yacha_uses", []))
+                cutoff = dt - timedelta(hours=24)
+                uses = [x for x in uses if x.get("ts") and x["ts"] >= cutoff]
+                if len(uses) >= 2:
+                    await update.message.reply_text("야차는 24시간 동안 2번만 사용할 수 있습니다.")
+                    return
+
+                uses.append({"ts": dt})
+                uref.set({"yacha_uses": uses, "last_seen": dt}, merge=True)
+
+                context.chat_data["yacha_pending"] = {
+                    "challenger_id": int(update.effective_user.id),
+                    "started_at": dt,
+                }
+                await update.message.reply_text("야차를 뜨실 악당을 선택해주세요.")
                 return
 
-            target_doc = docs[0]
-            target_data = target_doc.to_dict() or {}
-            opponent_id = int(target_data.get("user_id", int(target_doc.id)))
-            if opponent_id == int(update.effective_user.id):
-                await update.message.reply_text("본인은 상대가 될 수 없습니다.")
-                return
+            pending = context.chat_data.get("yacha_pending")
+            if pending and isinstance(pending, dict):
+                if int(pending.get("challenger_id", 0)) == int(update.effective_user.id) and is_username_token(text.strip()):
+                    target_username = parse_username_token(text.strip())
+                    db = get_firebase_client()
+                    users_coll = chat_ref(db, chat_id_for_lock).collection("users")
+                    docs = list(users_coll.where("username", "==", target_username).limit(1).stream())
+                    if not docs:
+                        docs = list(users_coll.where("username", "==", target_username.lower()).limit(1).stream())
+                    if not docs:
+                        await update.message.reply_text(f"@{target_username} 유저를 찾을 수 없습니다.")
+                        return
 
-            if get_active_duel(chat_id) is not None:
-                await update.message.reply_text("현재 진행 중인 야차가 있습니다.")
-                return
+                    target_doc = docs[0]
+                    target_data = target_doc.to_dict() or {}
+                    opponent_id = int(target_data.get("user_id", int(target_doc.id)))
+                    if opponent_id == int(update.effective_user.id):
+                        await update.message.reply_text("본인은 상대가 될 수 없습니다.")
+                        return
 
-            duel = {
-                "chat_id": chat_id,
-                "challenger_id": int(update.effective_user.id),
-                "challenger_display": f"@{update.effective_user.username}" if update.effective_user.username else str(update.effective_user.id),
-                "opponent_id": opponent_id,
-                "opponent_username": target_username,
-                "accepted": False,
-                "choices": {},
-                "created_at": now_kst(),
-            }
-            set_active_duel(chat_id, duel)
-            context.chat_data.pop("yacha_pending", None)
+                    if get_active_duel(chat_id_for_lock) is not None:
+                        await update.message.reply_text("현재 진행 중인 야차가 있습니다.")
+                        return
 
-            kb = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            text="네",
-                            callback_data=f"yacha_accept:{chat_id}:{duel['challenger_id']}:{duel['opponent_id']}:yes",
-                        ),
-                        InlineKeyboardButton(
-                            text="아니오",
-                            callback_data=f"yacha_accept:{chat_id}:{duel['challenger_id']}:{duel['opponent_id']}:no",
-                        ),
-                    ]
-                ]
-            )
-            await update.effective_chat.send_message(
-                f"@{target_username}님 야차를 수락하시겠습니까?",
-                reply_markup=kb,
-            )
-            return
+                    duel = {
+                        "chat_id": chat_id_for_lock,
+                        "challenger_id": int(update.effective_user.id),
+                        "challenger_display": f"@{update.effective_user.username}" if update.effective_user.username else str(update.effective_user.id),
+                        "opponent_id": opponent_id,
+                        "opponent_username": target_username,
+                        "accepted": False,
+                        "choices": {},
+                        "created_at": now_kst(),
+                    }
+                    set_active_duel(chat_id_for_lock, duel)
+                    context.chat_data.pop("yacha_pending", None)
+
+                    kb = InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    text="네",
+                                    callback_data=f"yacha_accept:{chat_id_for_lock}:{duel['challenger_id']}:{duel['opponent_id']}:yes",
+                                ),
+                                InlineKeyboardButton(
+                                    text="아니오",
+                                    callback_data=f"yacha_accept:{chat_id_for_lock}:{duel['challenger_id']}:{duel['opponent_id']}:no",
+                                ),
+                            ]
+                        ]
+                    )
+                    await update.effective_chat.send_message(
+                        f"@{target_username}님 야차를 수락하시겠습니까?",
+                        reply_markup=kb,
+                    )
+                    return
 
     if text.strip() == "!타노스":
         if not is_owner(update):
@@ -939,6 +969,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if decision == "no":
             set_active_duel(chat_id, None)
+            context.chat_data.pop("yacha_pending", None)
             await q.message.edit_text("야차가 거절되었습니다.")
             return
 
