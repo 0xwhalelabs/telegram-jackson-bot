@@ -276,7 +276,11 @@ PALS_PAYOUT_EXP: Dict[str, int] = {
 
 
 def get_pals_asset_base_url() -> str:
-    return os.getenv("PALS_ASSET_BASE_URL", "").strip().rstrip("/")
+    v = os.getenv("PALS_ASSET_BASE_URL", "")
+    v = (v or "").strip().strip('"').strip("'")
+    if v.startswith("PALS_ASSET_BASE_URL="):
+        v = v.split("=", 1)[1].strip()
+    return v.rstrip("/")
 
 
 def pals_egg_gif_url() -> str:
