@@ -217,6 +217,64 @@ async def handle_reset_db(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(f"DB 초기화 완료. 삭제된 유저 데이터: {deleted_users}개")
 
 
+async def reset_user_by_username(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    target_username: str,
+) -> None:
+    if update.effective_chat is None or update.message is None:
+        return
+
+    if not is_allowed_chat(update):
+        return
+
+    if not is_owner(update):
+        await update.message.reply_text("권한이 없습니다.")
+        return
+
+    chat_id = int(update.effective_chat.id)
+    uname = (target_username or "").strip()
+    if uname.startswith("@"): 
+        uname = uname[1:]
+    if not uname:
+        await update.message.reply_text("유저명을 확인할 수 없습니다.")
+        return
+
+    db = get_firebase_client()
+    users_coll = chat_ref(db, chat_id).collection("users")
+
+    docs = list(users_coll.where("username", "==", uname).limit(1).stream())
+    if not docs:
+        docs = list(users_coll.where("username", "==", uname.lower()).limit(1).stream())
+
+    if not docs:
+        await update.message.reply_text(f"@{uname} 유저를 찾을 수 없습니다.")
+        return
+
+    dt = now_kst()
+    today = kst_date_str(dt)
+
+    udoc = docs[0]
+    udoc.reference.set(
+        {
+            "total_exp": 0,
+            "current_level": 1,
+            "exp_events": [],
+            "exp_gained_today": 0,
+            "exp_gained_date": today,
+            "warn_count": 0,
+            "warn_reset_at": dt + timedelta(hours=24),
+            "mute_until": None,
+            "mute_tier_today": 0,
+            "mute_tier_date": today,
+            "last_seen": dt,
+        },
+        merge=True,
+    )
+
+    await update.message.reply_text(f"@{uname} 점수 초기화 완료")
+
+
 def is_anonymous_admin_message(update: Update) -> bool:
     if update.message is None:
         return False
@@ -323,6 +381,14 @@ async def maybe_delete_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
 
+async def kick_user(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> None:
+    try:
+        await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+        await context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
+    except Exception:
+        return
+
+
 async def restrict_user(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
@@ -365,6 +431,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = update.message.text
+
+    if text.strip() == "!타노스":
+        if not is_owner(update):
+            await update.message.reply_text("권한이 없습니다.")
+            return
+        context.chat_data["thanos_mode"] = True
+        await update.message.reply_text("타노스할 유저를 선택해주세요.")
+        return
+
+    if is_owner(update) and context.chat_data.get("thanos_mode"):
+        t = text.strip()
+        if t.startswith("!") and len(t) > 1 and " " not in t and t not in (
+            "!exp",
+            ".exp",
+            "!reset_db",
+            "!reset_db confirm",
+            "!chat_id",
+            "!whoami",
+            "!리더보드",
+            "!leaderboard",
+            "!타노스",
+        ):
+            target_username = t[1:]
+            context.chat_data["thanos_mode"] = False
+            await reset_user_by_username(update, context, target_username)
+            return
 
     if text.strip() in ("!리더보드", "!leaderboard"):
         if not is_owner(update):
@@ -434,6 +526,8 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
     cdata = chat_snap.to_dict() if chat_snap.exists else {}
     udata = user_snap.to_dict() if user_snap.exists else {}
 
+    cur_text = (text or "").strip()
+
     mute_until = udata.get("mute_until")
     if (not is_owner(update)) and mute_until and mute_until > dt:
         return
@@ -443,6 +537,66 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
     if not warn_reset_at or warn_reset_at <= dt:
         warn_count = 0
         warn_reset_at = dt + timedelta(hours=24)
+
+    last_text = udata.get("last_text")
+    last_text_ts = udata.get("last_text_ts")
+    is_consecutive_repeat = False
+    if last_text and isinstance(last_text, str) and cur_text:
+        if last_text == cur_text:
+            if last_text_ts and last_text_ts >= dt - timedelta(minutes=5):
+                is_consecutive_repeat = True
+
+    if (not is_owner(update)) and is_consecutive_repeat:
+        warn_count += 1
+        warn_reset_at = dt + timedelta(hours=24)
+
+        display_warn_count = warn_count
+
+        total_exp = int(udata.get("total_exp", 0))
+        current_level = int(udata.get("current_level", compute_level(total_exp)[0]))
+        kicked = False
+        if warn_count >= 3:
+            total_exp = max(0, total_exp - 100)
+            current_level = compute_level(total_exp)[0]
+            warn_count = 0
+            kicked = True
+
+        uref.set(
+            {
+                "user_id": user_id,
+                "username": username or None,
+                "display": display,
+                "warn_count": warn_count,
+                "warn_reset_at": warn_reset_at,
+                "total_exp": total_exp,
+                "current_level": current_level,
+                "last_text": cur_text,
+                "last_text_ts": dt,
+                "last_seen": dt,
+                "last_active_date": today,
+            },
+            merge=True,
+        )
+        cref.set(
+            {
+                "chat_id": chat_id,
+                "title": chat_title,
+                "last_seen": dt,
+            },
+            merge=True,
+        )
+
+        await update.effective_chat.send_message(
+            "삐빅! 동일 메시지 반복 경고입니다. 경고 3회누적시 강퇴처리되며 해당 유저의 경험치는 -100이됩니다. "
+            f"{display}님 누적 경고수 {display_warn_count}회"
+        )
+
+        if kicked:
+            await kick_user(context, int(chat_id), int(user_id))
+            await update.effective_chat.send_message(
+                f"{display}님 경고 3회 누적으로 강퇴 및 EXP -100 처리되었습니다."
+            )
+        return
 
     mute_tier_date = udata.get("mute_tier_date")
     mute_tier_today = int(udata.get("mute_tier_today", 0))
@@ -507,6 +661,8 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
                 f"🔇 {display}님 경고 누적으로 {minutes}분간 뮤트 처리되었습니다."
             )
         return
+
+    uref.set({"last_text": cur_text, "last_text_ts": dt}, merge=True)
 
     exp_events: List[Dict[str, Any]] = list(udata.get("exp_events", []))
     exp_events = [e for e in exp_events if e.get("ts") and e["ts"] >= dt - timedelta(minutes=1)]
