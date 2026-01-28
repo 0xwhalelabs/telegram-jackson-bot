@@ -730,6 +730,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "!펭귄": "penguin",
         "!왈렛그는감히전설이라할수있다": "whalet_legend",
         "!엄마": "mom",
+        "!감자탕": "gamjatang",
+        "!펍펍펍펍펍펍펍펍펍펍펍펍펍펍": "pubpub",
+        "!트레이드에브리띵스펜드에브리웨어": "trade_everything_spend_everywhere",
+        "!트레이드에브리띵스펜드에브리웨어,": "trade_everything_spend_everywhere",
+        "!보물내놔": "give_me_treasure",
+        "!팬티속보물": "panty_treasure",
     }
     tkey = treasure_map.get(text.strip())
     if tkey is not None:
@@ -797,6 +803,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 ]
             )
         )
+        return
+
+    if text.strip() == "/vc":
+        await update.message.reply_text("댄스남한테 물어보세요")
         return
 
     if text.strip() == "!가이드":
@@ -1419,8 +1429,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     ]
                 ]
             )
+            owner_tag = f"<a href=\"tg://user?id={int(owner_id)}\">방장</a>"
             await update.effective_chat.send_message(
-                "방장님, 덤벼고래를 수락하시겠습니까?",
+                f"{owner_tag}님, 덤벼고래를 수락하시겠습니까?",
+                parse_mode="HTML",
                 reply_markup=kb,
             )
             return
@@ -1602,25 +1614,19 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
         counter = int(cdata2.get("blessing_counter", 0))
         defense_counter = int(cdata2.get("defense_counter", 0))
         edison_counter = int(cdata2.get("edison_counter", 0))
+        bonus_exp = 0
+        bonus_msg: List[str] = []
         counter += 1
         defense_counter += 1
         edison_counter += 1
         if counter >= 365:
             counter = 0
-            total_exp2 = int(udata.get("total_exp", 0)) + 100
-            level2 = compute_level(total_exp2)[0]
-            uref.set({"total_exp": total_exp2, "current_level": level2}, merge=True)
-            await update.effective_chat.send_message(
-                f"띠링! 왈렛의 축복이 찾아왔습니다. {display}님이 100EXP를 획득하였습니다."
-            )
+            bonus_exp += 100
+            bonus_msg.append(f"띠링! 왈렛의 축복이 찾아왔습니다. {display}님이 100EXP를 획득하였습니다.")
         if edison_counter >= 777:
             edison_counter = 0
-            total_exp3 = int(udata.get("total_exp", 0)) + 500
-            level3 = compute_level(total_exp3)[0]
-            uref.set({"total_exp": total_exp3, "current_level": level3}, merge=True)
-            await update.effective_chat.send_message(
-                f"777번째엔 에디슨의 지혜가 내려옵니다. {display}님이 500EXP를 획득"
-            )
+            bonus_exp += 500
+            bonus_msg.append(f"777번째엔 에디슨의 지혜가 내려옵니다. {display}님이 500EXP를 획득")
         if defense_counter >= 500:
             defense_counter = 0
             lvl0, tickets0 = sword_state_from_udata(udata)
@@ -1640,6 +1646,19 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
             },
             merge=True,
         )
+
+    if bonus_exp > 0:
+        total0 = int(udata.get("total_exp", 0))
+        total1 = total0 + int(bonus_exp)
+        level1 = compute_level(total1)[0]
+        uref.set({"total_exp": total1, "current_level": level1}, merge=True)
+        udata["total_exp"] = total1
+        udata["current_level"] = level1
+        for m in bonus_msg:
+            try:
+                await update.effective_chat.send_message(m)
+            except Exception:
+                pass
 
     cur_text = (text or "").strip()
 
