@@ -14,6 +14,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from firebase_admin import credentials, firestore
 import firebase_admin
+try:
+    from google.cloud.firestore_v1 import FieldFilter
+except Exception:
+    from google.cloud.firestore_v1.base_query import FieldFilter
 from telegram import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ChatType
 from telegram.ext import (
@@ -521,9 +525,9 @@ async def reset_user_by_username(
     db = get_firebase_client()
     users_coll = chat_ref(db, chat_id).collection("users")
 
-    docs = list(users_coll.where("username", "==", uname).limit(1).stream())
+    docs = list(users_coll.where(filter=FieldFilter("username", "==", uname)).limit(1).stream())
     if not docs:
-        docs = list(users_coll.where("username", "==", uname.lower()).limit(1).stream())
+        docs = list(users_coll.where(filter=FieldFilter("username", "==", uname.lower())).limit(1).stream())
 
     if not docs:
         await update.message.reply_text(f"@{uname} 유저를 찾을 수 없습니다.")
@@ -716,6 +720,66 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = update.message.text
+
+    treasure_map: Dict[str, str] = {
+        "!섹스": "sex",
+        "!왈렛": "whalet",
+        "!에디슨": "edison",
+        "!베이스드": "based",
+    }
+    tkey = treasure_map.get(text.strip())
+    if tkey is not None:
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 입력해 주세요."
+            )
+            return
+        chat_id = int(update.effective_chat.id)
+        user_id = int(update.effective_user.id)
+        db = get_firebase_client()
+        dt = now_kst()
+        today = kst_date_str(dt)
+        async with get_user_lock(chat_id, user_id):
+            uref = user_ref(db, chat_id, user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            found = udata.get("treasures_found")
+            if not isinstance(found, dict):
+                found = {}
+            if found.get(tkey):
+                await update.message.reply_text(
+                    "해당 보물은 이미 비열한 파수꾼이 찾아감 ㄹㅇㅋㅋ 아쉽ㄲㅂㄲㅂ 스트레스 받을거야"
+                )
+                return
+            total_exp = int(udata.get("total_exp", 0)) + 500
+            level = compute_level(total_exp)[0]
+            found2 = dict(found)
+            found2[tkey] = True
+            uref.set(
+                {
+                    "total_exp": total_exp,
+                    "current_level": level,
+                    "treasures_found": found2,
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+        await update.message.reply_text("숨은 보물찾기에 성공하였습니다.")
+        return
+
+    if text.strip() == "!잭슨":
+        await update.message.reply_text(
+            random.choice(
+                [
+                    "그만불러",
+                    "부르지마",
+                    "아임낫유얼파더",
+                ]
+            )
+        )
+        return
 
     if text.strip() == "!가이드":
         await update.message.reply_text(
@@ -1252,6 +1316,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(f"오늘 저녁 추천: {pick}")
         return
 
+    if text.strip() == "!안덤벼":
+        if not is_owner(update):
+            await update.message.reply_text("권한이 없습니다.")
+            return
+        chat_id_for_lock = int(update.effective_chat.id)
+        async with get_yacha_chat_lock(chat_id_for_lock):
+            if get_active_duel(chat_id_for_lock) is None:
+                await update.message.reply_text("현재 진행 중인 야차가 없습니다.")
+                return
+            set_active_duel(chat_id_for_lock, None)
+            context.chat_data.pop("yacha_pending", None)
+        await update.message.reply_text("진행 중인 야차를 모두 종료했습니다.")
+        return
+
     if text.strip() == "!덤벼고래":
         chat_id_for_lock = int(update.effective_chat.id)
         async with get_yacha_chat_lock(chat_id_for_lock):
@@ -1505,8 +1583,10 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
         cdata2 = chat_snap2.to_dict() if chat_snap2.exists else {}
         counter = int(cdata2.get("blessing_counter", 0))
         defense_counter = int(cdata2.get("defense_counter", 0))
+        edison_counter = int(cdata2.get("edison_counter", 0))
         counter += 1
         defense_counter += 1
+        edison_counter += 1
         if counter >= 365:
             counter = 0
             total_exp2 = int(udata.get("total_exp", 0)) + 100
@@ -1514,6 +1594,14 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
             uref.set({"total_exp": total_exp2, "current_level": level2}, merge=True)
             await update.effective_chat.send_message(
                 f"띠링! 왈렛의 축복이 찾아왔습니다. {display}님이 100EXP를 획득하였습니다."
+            )
+        if edison_counter >= 777:
+            edison_counter = 0
+            total_exp3 = int(udata.get("total_exp", 0)) + 500
+            level3 = compute_level(total_exp3)[0]
+            uref.set({"total_exp": total_exp3, "current_level": level3}, merge=True)
+            await update.effective_chat.send_message(
+                f"777번째엔 에디슨의 지혜가 내려옵니다. {display}님이 500EXP를 획득"
             )
         if defense_counter >= 500:
             defense_counter = 0
@@ -1530,6 +1618,7 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
                 "last_seen": dt,
                 "blessing_counter": counter,
                 "defense_counter": defense_counter,
+                "edison_counter": edison_counter,
             },
             merge=True,
         )
