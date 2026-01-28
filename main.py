@@ -95,7 +95,7 @@ def release_two_user_locks(lock1: asyncio.Lock, lock2: asyncio.Lock) -> None:
 
 KST_TZ = "Asia/Seoul"
 
-KEYWORD_PATTERN = re.compile(r"(?i)(\bbased\b|베이스드)")
+KEYWORD_PATTERN = re.compile(r"(?i)(\bbased\b)")
 URL_PATTERN = re.compile(
     r"(?i)(https?://|t\.me/|www\.|\b[\w-]+\.(com|io|net|me|kr|org|gg|xyz|app|dev)\b)"
 )
@@ -348,31 +348,31 @@ async def download_url_bytes(url: str, timeout_seconds: int = 15) -> Optional[by
 SWORD_MAX_LEVEL = 20
 SWORD_NONE_LEVEL = -1
 BASED_MALL_SWORD_LEVEL = 0
-BASED_MALL_PRICE_EXP = 100
+BASED_MALL_PRICE_EXP = 70
 
 
 SWORD_TABLE: Dict[int, Dict[str, Any]] = {
     0: {"name": "오래된 Based 나무 검", "cost": 0, "rate": 1.0, "sell": 5},
-    1: {"name": "실버 Based 검", "cost": 50, "rate": 0.70, "sell": 80},
-    2: {"name": "실버+ 검", "cost": 80, "rate": 0.60, "sell": 180},
-    3: {"name": "골드 Based 검", "cost": 120, "rate": 0.50, "sell": 350},
-    4: {"name": "골드+ 검", "cost": 180, "rate": 0.40, "sell": 650},
-    5: {"name": "플래티넘 Based 검", "cost": 250, "rate": 0.30, "sell": 1100},
-    6: {"name": "플래티넘+ 검", "cost": 350, "rate": 0.22, "sell": 1800},
-    7: {"name": "루비 Based 검", "cost": 500, "rate": 0.17, "sell": 3000},
-    8: {"name": "루비+ 검", "cost": 700, "rate": 0.13, "sell": 5000},
-    9: {"name": "사파이어 Based 검", "cost": 1000, "rate": 0.10, "sell": 8500},
-    10: {"name": "사파이어+ 검", "cost": 1400, "rate": 0.08, "sell": 15000},
-    11: {"name": "오닉스 Based 검", "cost": 2000, "rate": 0.06, "sell": 26000},
-    12: {"name": "오닉스+ 검", "cost": 2800, "rate": 0.045, "sell": 45000},
-    13: {"name": "블러드 Based 검", "cost": 3800, "rate": 0.03, "sell": 80000},
-    14: {"name": "블러드+ 검", "cost": 5200, "rate": 0.02, "sell": 150000},
-    15: {"name": "검은 왕의 검", "cost": 7000, "rate": 0.013, "sell": 280000},
-    16: {"name": "세계절단 검", "cost": 9000, "rate": 0.009, "sell": 500000},
-    17: {"name": "신의 시험 검", "cost": 12000, "rate": 0.006, "sell": 900000},
-    18: {"name": "멸망의 Based 검", "cost": 16000, "rate": 0.0035, "sell": 1600000},
-    19: {"name": "신화의 끝 검", "cost": 22000, "rate": 0.0015, "sell": 3000000},
-    20: {"name": "⚫ 절대자 Based 검", "cost": 30000, "rate": 0.0005, "sell": None},
+    1: {"name": "실버 Based 검", "cost": 35, "rate": 0.85, "sell": 80},
+    2: {"name": "실버+ 검", "cost": 56, "rate": 0.80, "sell": 180},
+    3: {"name": "골드 Based 검", "cost": 84, "rate": 0.75, "sell": 350},
+    4: {"name": "골드+ 검", "cost": 126, "rate": 0.70, "sell": 650},
+    5: {"name": "플래티넘 Based 검", "cost": 175, "rate": 0.65, "sell": 1100},
+    6: {"name": "플래티넘+ 검", "cost": 245, "rate": 0.55, "sell": 1800},
+    7: {"name": "루비 Based 검", "cost": 350, "rate": 0.48, "sell": 3000},
+    8: {"name": "루비+ 검", "cost": 490, "rate": 0.42, "sell": 5000},
+    9: {"name": "사파이어 Based 검", "cost": 700, "rate": 0.36, "sell": 8500},
+    10: {"name": "사파이어+ 검", "cost": 980, "rate": 0.30, "sell": 15000},
+    11: {"name": "오닉스 Based 검", "cost": 1400, "rate": 0.24, "sell": 26000},
+    12: {"name": "오닉스+ 검", "cost": 1960, "rate": 0.19, "sell": 45000},
+    13: {"name": "블러드 Based 검", "cost": 2660, "rate": 0.14, "sell": 80000},
+    14: {"name": "블러드+ 검", "cost": 3640, "rate": 0.10, "sell": 150000},
+    15: {"name": "검은 왕의 검", "cost": 4900, "rate": 0.065, "sell": 280000},
+    16: {"name": "세계절단 검", "cost": 6300, "rate": 0.04, "sell": 500000},
+    17: {"name": "신의 시험 검", "cost": 8400, "rate": 0.025, "sell": 900000},
+    18: {"name": "멸망의 Based 검", "cost": 11200, "rate": 0.015, "sell": 1600000},
+    19: {"name": "신화의 끝 검", "cost": 15400, "rate": 0.008, "sell": 3000000},
+    20: {"name": "⚫ 절대자 Based 검", "cost": 21000, "rate": 0.002, "sell": None},
 }
 
 
@@ -726,6 +726,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "!왈렛": "whalet",
         "!에디슨": "edison",
         "!베이스드": "based",
+        "!TGE": "tge",
         "!스트레스": "stress",
         "!펭귄": "penguin",
         "!왈렛그는감히전설이라할수있다": "whalet_legend",
@@ -837,7 +838,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "- !강화확률: 강화 단계별 비용/확률/판매가 확인\n"
             "- !오른: 강화 진행(확정 버튼)\n"
             "- !당근마켓: 현재 검 판매(확정 버튼)\n"
-            "- !베이스드몰: 검 구매(100EXP, 검이 없을 때만 가능)\n"
+            f"- !베이스드몰: 검 구매({BASED_MALL_PRICE_EXP}EXP, 검이 없을 때만 가능)\n"
             "\n"
             "[기타]\n"
             "- !whoami: 내 USER_ID/USERNAME 확인\n"
@@ -1148,10 +1149,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if not row:
                 continue
             rate = float(row["rate"]) * 100
-            sell = row.get("sell")
-            sell_txt = "판매 불가" if sell is None else f"{int(sell)}EXP"
             lines.append(
-                f"{lvl}강: {row['name']} | 비용 {int(row['cost'])}EXP | 확률 {rate:.2f}% | 판매가 {sell_txt}"
+                f"{lvl}강: {row['name']} | 확률 {rate:.2f}%"
             )
         await update.message.reply_text("\n".join(lines))
         return
@@ -2446,13 +2445,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 lvl2 = nxt_level
                 msg = f"강화 성공! [{nxt_name}] 획득!"
             else:
+                cashback = int(int(cost) * 0.30)
+                total_exp += cashback
+                cashback_msg = (
+                    "대장장이 오른이 불쌍한 당신에게 Based 카드 캐시백 혜택을 줍니다 "
+                    f"받은 캐시백 : {cashback}EXP"
+                )
                 if tickets > 0:
                     tickets -= 1
                     lvl2 = lvl
-                    msg = "강화 실패! 방어티켓 1장을 사용하여 검이 복구되었습니다."
+                    msg = "강화 실패! 방어티켓 1장을 사용하여 검이 복구되었습니다.\n" + cashback_msg
                 else:
                     lvl2 = SWORD_NONE_LEVEL
-                    msg = "강화 실패! 검이 파괴되어 사라졌습니다."
+                    msg = "강화 실패! 검이 파괴되어 사라졌습니다.\n" + cashback_msg
 
             new_level = compute_level(total_exp)[0]
             uref.set(
