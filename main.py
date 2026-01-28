@@ -726,6 +726,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "!왈렛": "whalet",
         "!에디슨": "edison",
         "!베이스드": "based",
+        "!스트레스": "stress",
+        "!펭귄": "penguin",
+        "!왈렛그는감히전설이라할수있다": "whalet_legend",
+        "!엄마": "mom",
     }
     tkey = treasure_map.get(text.strip())
     if tkey is not None:
