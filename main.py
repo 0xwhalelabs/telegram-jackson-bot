@@ -740,11 +740,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         db = get_firebase_client()
         dt = now_kst()
         today = kst_date_str(dt)
-        async with get_user_lock(chat_id, user_id):
-            uref = user_ref(db, chat_id, user_id)
-            snap = uref.get()
-            udata = snap.to_dict() if snap.exists else {}
-            found = udata.get("treasures_found")
+
+        async with get_chat_lock(chat_id):
+            cref = chat_ref(db, chat_id)
+            csnap = cref.get()
+            cdata = csnap.to_dict() if csnap.exists else {}
+            found = cdata.get("treasures_found_global")
             if not isinstance(found, dict):
                 found = {}
             if found.get(tkey):
@@ -752,20 +753,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     "해당 보물은 이미 비열한 파수꾼이 찾아감 ㄹㅇㅋㅋ 아쉽ㄲㅂㄲㅂ 스트레스 받을거야"
                 )
                 return
-            total_exp = int(udata.get("total_exp", 0)) + 500
-            level = compute_level(total_exp)[0]
             found2 = dict(found)
             found2[tkey] = True
+            cref.set(
+                {
+                    "chat_id": chat_id,
+                    "treasures_found_global": found2,
+                    "last_seen": dt,
+                },
+                merge=True,
+            )
+
+        async with get_user_lock(chat_id, user_id):
+            uref = user_ref(db, chat_id, user_id)
+            usnap = uref.get()
+            udata = usnap.to_dict() if usnap.exists else {}
+            total_exp = int(udata.get("total_exp", 0)) + 500
+            level = compute_level(total_exp)[0]
             uref.set(
                 {
                     "total_exp": total_exp,
                     "current_level": level,
-                    "treasures_found": found2,
                     "last_seen": dt,
                     "last_active_date": today,
                 },
                 merge=True,
             )
+
         await update.message.reply_text("숨은 보물찾기에 성공하였습니다.")
         return
 
