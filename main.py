@@ -733,6 +733,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if update.message is None or update.message.text is None:
         return
 
+    if update.effective_chat.type == ChatType.PRIVATE:
+        text = update.message.text
+        if "마피아" in text and "오늘" in text:
+            if not is_owner(update):
+                await update.message.reply_text("권한이 없습니다.")
+                return
+            allowed = get_allowed_chat_id()
+            if allowed is None:
+                await update.message.reply_text("설정된 채팅이 없습니다.")
+                return
+            db = get_firebase_client()
+            dt = now_kst()
+            today = kst_date_str(dt)
+            cref = chat_ref(db, int(allowed))
+            csnap = cref.get()
+            cdata = csnap.to_dict() if csnap.exists else {}
+            mafia_date = cdata.get("mafia_date")
+            if mafia_date != today:
+                await update.message.reply_text("오늘의 마피아 데이터가 없습니다.")
+                return
+            mafia_ids = cdata.get("mafia_all_ids")
+            if not isinstance(mafia_ids, list) or not mafia_ids:
+                mafia_ids = cdata.get("mafia_alive_ids")
+            if not isinstance(mafia_ids, list):
+                mafia_ids = []
+            mafia_ids = [int(x) for x in mafia_ids if isinstance(x, int)]
+            if not mafia_ids:
+                await update.message.reply_text("오늘의 마피아 데이터가 없습니다.")
+                return
+
+            users = list(cref.collection("users").stream())
+            id_to_name: Dict[int, str] = {}
+            for udoc in users:
+                udata = udoc.to_dict() or {}
+                uid = int(udata.get("user_id", int(udoc.id)))
+                uname = udata.get("username")
+                if isinstance(uname, str) and uname.strip():
+                    id_to_name[uid] = uname.strip()
+                    continue
+                disp = udata.get("display")
+                if isinstance(disp, str) and disp.strip():
+                    id_to_name[uid] = disp.strip().lstrip("@").strip()
+
+            names = [id_to_name.get(mid, str(mid)) for mid in mafia_ids]
+            await update.message.reply_text(f"오늘의 마피아: {', '.join(names)}")
+        return
+
     if update.effective_chat.type not in (ChatType.SUPERGROUP, ChatType.GROUP):
         return
 
@@ -1039,6 +1086,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     merge=True,
                 )
 
+        users = list(cref.collection("users").stream())
+        target_id = None
+        for udoc in users:
+            udata = udoc.to_dict() or {}
+            uname = udata.get("username")
+            if isinstance(uname, str) and uname.lower() == target_name.lower():
+                target_id = int(udata.get("user_id", int(udoc.id)))
+                break
+
+        if target_id is None:
+            await update.message.reply_text("대상 유저를 찾을 수 없습니다.")
+            return
+
         async with get_user_lock(chat_id, catcher_id):
             csnap = catcher_ref.get()
             cdata_u = csnap.to_dict() if csnap.exists else {}
@@ -1060,19 +1120,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 },
                 merge=True,
             )
-
-        users = list(cref.collection("users").stream())
-        target_id = None
-        for udoc in users:
-            udata = udoc.to_dict() or {}
-            uname = udata.get("username")
-            if isinstance(uname, str) and uname.lower() == target_name.lower():
-                target_id = int(udata.get("user_id", int(udoc.id)))
-                break
-
-        if target_id is None:
-            await update.message.reply_text("대상 유저를 찾을 수 없습니다.")
-            return
 
         async with get_chat_lock(chat_id):
             csnap2 = cref.get()
@@ -1642,6 +1689,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     pass
         await update.message.reply_text(
             f"오늘 덤벼고래 사용 기록을 초기화했습니다. (대상 {cnt}명)"
+        )
+        return
+
+    if text.strip() == "!검거횟수초기화":
+        if not is_owner(update):
+            await update.message.reply_text("권한이 없습니다.")
+            return
+        chat_id_for_lock = int(update.effective_chat.id)
+        async with get_chat_lock(chat_id_for_lock):
+            dt_now = now_kst()
+            today_kst = kst_date_str(dt_now)
+            db = get_firebase_client()
+            users_col = chat_ref(db, chat_id_for_lock).collection("users")
+            targets = users_col.where(
+                filter=FieldFilter("mafia_catch_uses_date", "==", today_kst)
+            ).stream()
+            cnt = 0
+            for doc in targets:
+                try:
+                    users_col.document(str(doc.id)).set(
+                        {
+                            "mafia_catch_uses_date": today_kst,
+                            "mafia_catch_uses_today": 0,
+                            "last_seen": dt_now,
+                        },
+                        merge=True,
+                    )
+                    cnt += 1
+                except Exception:
+                    pass
+        await update.message.reply_text(
+            f"오늘 검거 사용 기록을 초기화했습니다. (대상 {cnt}명)"
         )
         return
 
