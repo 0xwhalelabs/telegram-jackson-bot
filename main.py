@@ -2130,7 +2130,19 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
         easter_user_ids = cdata2.get("easter_bisd_user_ids")
         if not isinstance(easter_user_ids, list):
             easter_user_ids = []
-        easter_user_ids = [int(x) for x in easter_user_ids if isinstance(x, int)]
+        tmp_ids: List[int] = []
+        for x in easter_user_ids:
+            if isinstance(x, bool):
+                continue
+            if isinstance(x, int):
+                tmp_ids.append(int(x))
+                continue
+            if isinstance(x, float) and x.is_integer():
+                tmp_ids.append(int(x))
+                continue
+            if isinstance(x, str) and x.strip().isdigit():
+                tmp_ids.append(int(x.strip()))
+        easter_user_ids = tmp_ids
 
         easter_winners: Optional[List[int]] = None
         if not easter_done:
@@ -2185,9 +2197,27 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
 
     winners = context.chat_data.pop("easter_bisd_winners", None)
     if isinstance(winners, list) and winners:
+        sender_id = int(user_id)
         for wid in winners:
-            async with get_user_lock(chat_id, int(wid)):
-                wref = user_ref(db, chat_id, int(wid))
+            wid_i = int(wid)
+            if wid_i == sender_id:
+                total0 = int(udata.get("total_exp", 0))
+                total1 = total0 + int(EASTER_BISD_REWARD_EXP)
+                uref.set(
+                    {
+                        "total_exp": total1,
+                        "current_level": compute_level(total1)[0],
+                        "last_seen": dt,
+                        "last_active_date": today,
+                    },
+                    merge=True,
+                )
+                udata["total_exp"] = total1
+                udata["current_level"] = compute_level(total1)[0]
+                continue
+
+            async with get_user_lock(chat_id, wid_i):
+                wref = user_ref(db, chat_id, wid_i)
                 wsnap = wref.get()
                 wdata = wsnap.to_dict() if wsnap.exists else {}
                 total0 = int(wdata.get("total_exp", 0))
