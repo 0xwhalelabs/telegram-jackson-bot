@@ -746,6 +746,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "!왈렛": "whalet",
         "!에디슨": "edison",
         "!베이스드": "based",
+        "!어머님은짜장면이싫다고하셨어": "mom_hates_jjajang",
+        "!베이스드에디슨": "based_edison",
+        "!캐리비안의해적": "pirates_of_caribbean",
+        "!너와나의연결고리": "link_between_you_and_me",
+        "!대한민국만세": "korea_manse",
+        "!스테이베이스드": "stay_based",
         "!TGE": "tge",
         "!스트레스": "stress",
         "!펭귄": "penguin",
@@ -908,7 +914,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "  (하루 2회, 이기면 방장 EXP에서 최대 50EXP 획득)\n"
             "\n"
             "[마피아의 밤]\n"
-            "- !검거@유저네임: 마피아 검거 (하루 2회, 성공 시 500EXP)\n"
+            "- !검거username: 마피아 검거 (하루 5회, 성공 시 500EXP)\n"
             "  (마피아는 매일 00:00에 2명 선정, 11:00/15:00/20:00에 랜덤 유저 EXP를 강탈)\n"
             "\n"
             "[Based Pals]\n"
@@ -973,15 +979,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         raw = text.strip()
         target_name = ""
-        if raw.startswith("!검거@"):
-            target_name = raw[len("!검거@"):].strip()
-        else:
-            target_name = raw[len("!검거"):].strip()
-            if target_name.startswith("@"):
-                target_name = target_name[1:].strip()
+        target_name = raw[len("!검거"):].strip()
+        if target_name.startswith("@"): 
+            target_name = target_name[1:].strip()
 
         if not target_name:
-            await update.message.reply_text("사용법: !검거@유저네임")
+            await update.message.reply_text("사용법: !검거username")
             return
 
         chat_id = int(update.effective_chat.id)
@@ -996,11 +999,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         async with get_chat_lock(chat_id):
             csnap = cref.get()
             cdata = csnap.to_dict() if csnap.exists else {}
+            mafia_cleared_date = cdata.get("mafia_cleared_date")
             mafia_date = cdata.get("mafia_date")
             alive_ids = cdata.get("mafia_alive_ids")
             if not isinstance(alive_ids, list):
                 alive_ids = []
             alive_ids = [int(x) for x in alive_ids if isinstance(x, int)]
+
+            if mafia_cleared_date == today:
+                await update.message.reply_text("오늘의 마피아는 모두 검거되었습니다.")
+                return
 
             if mafia_date != today:
                 users = list(cref.collection("users").stream())
@@ -1024,6 +1032,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     {
                         "mafia_date": today,
                         "mafia_alive_ids": alive_ids,
+                        "mafia_all_ids": alive_ids,
+                        "mafia_cleared_date": None,
                         "last_seen": dt,
                     },
                     merge=True,
@@ -1037,8 +1047,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if uses_date != today:
                 uses_date = today
                 uses_today = 0
-            if uses_today >= 2:
-                await update.message.reply_text("검거는 하루 2번만 사용할 수 있습니다.")
+            if uses_today >= 5:
+                await update.message.reply_text("검거는 하루 5번만 사용할 수 있습니다.")
                 return
             uses_today += 1
             catcher_ref.set(
@@ -2935,6 +2945,7 @@ async def mafia_ensure_initialized_job(context: ContextTypes.DEFAULT_TYPE) -> No
             {
                 "mafia_date": today,
                 "mafia_alive_ids": mafia_ids,
+                "mafia_all_ids": mafia_ids,
                 "mafia_cleared_date": None,
                 "last_seen": dt,
             },
@@ -2968,6 +2979,7 @@ async def mafia_rollover_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             {
                 "mafia_date": today,
                 "mafia_alive_ids": mafia_ids,
+                "mafia_all_ids": mafia_ids,
                 "mafia_cleared_date": None,
                 "last_seen": dt,
             },
@@ -3101,6 +3113,64 @@ async def mafia_night_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
 
 
+async def mafia_reveal_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = get_firebase_client()
+    dt = now_kst()
+    today = kst_date_str(dt)
+
+    allowed = get_allowed_chat_id()
+    chats: List[Any]
+    if allowed is not None:
+        chats = [db.collection("chats").document(str(int(allowed))).get()]
+        chats = [c for c in chats if c.exists]
+    else:
+        chats = list(db.collection("chats").stream())
+
+    for cdoc in chats:
+        cdata = cdoc.to_dict() or {}
+        chat_id = cdata.get("chat_id")
+        if not chat_id:
+            continue
+
+        mafia_date = cdata.get("mafia_date")
+        if mafia_date != today:
+            continue
+
+        mafia_ids = cdata.get("mafia_all_ids")
+        if not isinstance(mafia_ids, list) or not mafia_ids:
+            mafia_ids = cdata.get("mafia_alive_ids")
+        if not isinstance(mafia_ids, list):
+            mafia_ids = []
+        mafia_ids = [int(x) for x in mafia_ids if isinstance(x, int)]
+        if not mafia_ids:
+            continue
+
+        users = list(cdoc.reference.collection("users").stream())
+        id_to_name: Dict[int, str] = {}
+        for udoc in users:
+            udata = udoc.to_dict() or {}
+            uid = int(udata.get("user_id", int(udoc.id)))
+            uname = udata.get("username")
+            if isinstance(uname, str) and uname.strip():
+                id_to_name[uid] = uname.strip()
+                continue
+            disp = udata.get("display")
+            if isinstance(disp, str) and disp.strip():
+                id_to_name[uid] = disp.strip().lstrip("@").strip()
+
+        names: List[str] = []
+        for mid in mafia_ids:
+            names.append(id_to_name.get(mid, str(mid)))
+
+        try:
+            await context.bot.send_message(
+                chat_id=int(chat_id),
+                text=f"오늘의 마피아는 {', '.join(names)} 이었습니다.",
+            )
+        except Exception:
+            continue
+
+
 async def send_leaderboard(context: ContextTypes.DEFAULT_TYPE) -> None:
     db = get_firebase_client()
     dt = now_kst()
@@ -3202,6 +3272,7 @@ def main() -> None:
     application.job_queue.run_daily(mafia_night_job, time=time(11, 0, tzinfo=kst))
     application.job_queue.run_daily(mafia_night_job, time=time(15, 0, tzinfo=kst))
     application.job_queue.run_daily(mafia_night_job, time=time(20, 0, tzinfo=kst))
+    application.job_queue.run_daily(mafia_reveal_job, time=time(23, 59, tzinfo=kst))
     application.job_queue.run_daily(send_fever_start, time=time(19, 0, tzinfo=kst))
     application.job_queue.run_daily(send_fever_end, time=time(23, 0, tzinfo=kst))
     application.job_queue.run_daily(send_leaderboard, time=time(10, 0, tzinfo=kst))
