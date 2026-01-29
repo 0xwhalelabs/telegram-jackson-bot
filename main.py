@@ -1422,6 +1422,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(f"오늘 저녁 추천: {pick}")
         return
 
+    if text.strip() == "!덤벼리셋":
+        if not is_owner(update):
+            await update.message.reply_text("권한이 없습니다.")
+            return
+        chat_id_for_lock = int(update.effective_chat.id)
+        async with get_yacha_chat_lock(chat_id_for_lock):
+            dt_now = now_kst()
+            today_kst = kst_date_str(dt_now)
+            db = get_firebase_client()
+            users_col = chat_ref(db, chat_id_for_lock).collection("users")
+            targets = users_col.where(filter=FieldFilter("yacha_uses_date", "==", today_kst)).stream()
+            cnt = 0
+            for doc in targets:
+                try:
+                    users_col.document(str(doc.id)).set(
+                        {
+                            "yacha_uses_date": today_kst,
+                            "yacha_uses_today": 0,
+                            "last_seen": dt_now,
+                        },
+                        merge=True,
+                    )
+                    cnt += 1
+                except Exception:
+                    pass
+        await update.message.reply_text(
+            f"오늘 덤벼고래 사용 기록을 초기화했습니다. (대상 {cnt}명)"
+        )
+        return
+
     if text.strip() == "!안덤벼":
         if not is_owner(update):
             await update.message.reply_text("권한이 없습니다.")
@@ -1691,6 +1721,9 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
         cdata2 = chat_snap2.to_dict() if chat_snap2.exists else {}
         counter = int(cdata2.get("blessing_counter", 0))
         defense_counter = int(cdata2.get("defense_counter", 0))
+        defense_target = cdata2.get("defense_target")
+        if not isinstance(defense_target, int) or defense_target < 1:
+            defense_target = random.randint(400, 600)
         edison_counter = int(cdata2.get("edison_counter", 0))
         bonus_exp = 0
         bonus_msg: List[str] = []
@@ -1705,13 +1738,14 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
             edison_counter = 0
             bonus_exp += 500
             bonus_msg.append(f"777번째엔 에디슨의 지혜가 내려옵니다. {display}님이 500EXP를 획득")
-        if defense_counter >= 500:
+        if defense_counter >= int(defense_target):
             defense_counter = 0
+            defense_target = random.randint(400, 600)
             lvl0, tickets0 = sword_state_from_udata(udata)
             tickets0 += 1
             uref.set({"sword_level": lvl0, "defense_tickets": tickets0}, merge=True)
             await update.effective_chat.send_message(
-                f"띠링! 누적채팅 500개를 달성하여 강화 방어티켓을 한장 부여합니다."
+                "띠링! 강화 방어티켓을 한장 부여합니다."
             )
         cref.set(
             {
@@ -1720,6 +1754,7 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
                 "last_seen": dt,
                 "blessing_counter": counter,
                 "defense_counter": defense_counter,
+                "defense_target": defense_target,
                 "edison_counter": edison_counter,
             },
             merge=True,
