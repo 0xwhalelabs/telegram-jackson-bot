@@ -877,6 +877,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "!슬픈젖꼭지증후군": "sad_nipple_syndrome",
         "!태극기휘날리며": "taegukgi_waving",
         "!어차피우승은동탄맘": "dontan_mom_wins_anyway",
+        "!뽀롱뽀롱뽀로로": "pororo_porong",
+        "!하츄핑보다좋은건시진핑": "xi_jinping_better_than_hachuping",
+        "!어머님은짜장면이싫다고하셨어반면에짬뽕은국물까지싹다비우셨지": "mom_hates_jjajang_but_ate_jjamppong",
+        "!별수호자에디슨": "star_guardian_edison",
+        "!사랑의추적자LEO": "heartseeker_leo",
+        "!수영장파티L": "pool_party_l",
+        "!돌아와요부산항에": "come_back_to_busan_port",
+        "!소환사의협곡": "summoners_rift",
+        "!인직만숙불쑥": "injik_mansuk_bulsuk",
+        "!인직만숙겸상": "injik_mansuk_gyeomsang",
+        "!어벤져스와마법사의돌": "avengers_and_sorcerers_stone",
     }
 
     if text.strip() == "!남은보물":
