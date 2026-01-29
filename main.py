@@ -1692,7 +1692,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    if text.strip() == "!검거횟수초기화":
+    if text.strip() == "!횟수검거초기화":
         if not is_owner(update):
             await update.message.reply_text("권한이 없습니다.")
             return
