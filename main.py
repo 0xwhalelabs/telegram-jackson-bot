@@ -907,6 +907,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "- !덤벼고래: 방장에게만 도전 가능한 가위바위보\n"
             "  (하루 2회, 이기면 방장 EXP에서 최대 50EXP 획득)\n"
             "\n"
+            "[마피아의 밤]\n"
+            "- !검거@유저네임: 마피아 검거 (하루 2회, 성공 시 500EXP)\n"
+            "  (마피아는 매일 00:00에 2명 선정, 11:00/15:00/20:00에 랜덤 유저 EXP를 강탈)\n"
+            "\n"
             "[Based Pals]\n"
             "- !알구매: 100EXP로 알 구매 (1시간 후 부화)\n"
             "- !먹이: 버튼으로 50/100/500EXP를 소모해 성장치 상승\n"
@@ -921,6 +925,151 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "\n"
             "[기타]\n"
             "- !whoami: 내 USER_ID/USERNAME 확인\n"
+        )
+        return
+
+    if text.strip().startswith("!검거"):
+        if update.effective_chat is None or update.effective_user is None:
+            return
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 입력해 주세요."
+            )
+            return
+
+        raw = text.strip()
+        target_name = ""
+        if raw.startswith("!검거@"):
+            target_name = raw[len("!검거@"):].strip()
+        else:
+            target_name = raw[len("!검거"):].strip()
+            if target_name.startswith("@"):
+                target_name = target_name[1:].strip()
+
+        if not target_name:
+            await update.message.reply_text("사용법: !검거@유저네임")
+            return
+
+        chat_id = int(update.effective_chat.id)
+        catcher_id = int(update.effective_user.id)
+        dt = now_kst()
+        today = kst_date_str(dt)
+
+        db = get_firebase_client()
+        cref = chat_ref(db, chat_id)
+        catcher_ref = user_ref(db, chat_id, catcher_id)
+
+        async with get_chat_lock(chat_id):
+            csnap = cref.get()
+            cdata = csnap.to_dict() if csnap.exists else {}
+            mafia_date = cdata.get("mafia_date")
+            alive_ids = cdata.get("mafia_alive_ids")
+            if not isinstance(alive_ids, list):
+                alive_ids = []
+            alive_ids = [int(x) for x in alive_ids if isinstance(x, int)]
+
+            if mafia_date != today:
+                users = list(cref.collection("users").stream())
+                candidates: List[int] = []
+                for udoc in users:
+                    udata = udoc.to_dict() or {}
+                    uid = int(udata.get("user_id", int(udoc.id)))
+                    if _is_recent_active(udata, dt):
+                        candidates.append(uid)
+                if len(candidates) < MAFIA_PER_CHAT:
+                    candidates = []
+                    for udoc in users:
+                        udata = udoc.to_dict() or {}
+                        uid = int(udata.get("user_id", int(udoc.id)))
+                        candidates.append(uid)
+                if len(set(candidates)) >= MAFIA_PER_CHAT:
+                    alive_ids = random.sample(list(set(candidates)), MAFIA_PER_CHAT)
+                else:
+                    alive_ids = list(set(candidates))
+                cref.set(
+                    {
+                        "mafia_date": today,
+                        "mafia_alive_ids": alive_ids,
+                        "last_seen": dt,
+                    },
+                    merge=True,
+                )
+
+        async with get_user_lock(chat_id, catcher_id):
+            csnap = catcher_ref.get()
+            cdata_u = csnap.to_dict() if csnap.exists else {}
+            uses_date = cdata_u.get("mafia_catch_uses_date")
+            uses_today = int(cdata_u.get("mafia_catch_uses_today", 0))
+            if uses_date != today:
+                uses_date = today
+                uses_today = 0
+            if uses_today >= 2:
+                await update.message.reply_text("검거는 하루 2번만 사용할 수 있습니다.")
+                return
+            uses_today += 1
+            catcher_ref.set(
+                {
+                    "mafia_catch_uses_date": uses_date,
+                    "mafia_catch_uses_today": uses_today,
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+
+        users = list(cref.collection("users").stream())
+        target_id = None
+        for udoc in users:
+            udata = udoc.to_dict() or {}
+            uname = udata.get("username")
+            if isinstance(uname, str) and uname.lower() == target_name.lower():
+                target_id = int(udata.get("user_id", int(udoc.id)))
+                break
+
+        if target_id is None:
+            await update.message.reply_text("대상 유저를 찾을 수 없습니다.")
+            return
+
+        async with get_chat_lock(chat_id):
+            csnap2 = cref.get()
+            cdata2 = csnap2.to_dict() if csnap2.exists else {}
+            alive_ids2 = cdata2.get("mafia_alive_ids")
+            if not isinstance(alive_ids2, list):
+                alive_ids2 = []
+            alive_ids2 = [int(x) for x in alive_ids2 if isinstance(x, int)]
+
+            if int(target_id) not in alive_ids2:
+                await update.message.reply_text("검거 실패!")
+                return
+
+            alive_ids3 = [x for x in alive_ids2 if int(x) != int(target_id)]
+            cref.set(
+                {
+                    "mafia_alive_ids": alive_ids3,
+                    "mafia_date": today,
+                    "last_seen": dt,
+                },
+                merge=True,
+            )
+
+        async with get_user_lock(chat_id, catcher_id):
+            csnap3 = catcher_ref.get()
+            cdata3 = csnap3.to_dict() if csnap3.exists else {}
+            total_exp = int(cdata3.get("total_exp", 0)) + int(MAFIA_CATCH_REWARD_EXP)
+            catcher_ref.set(
+                {
+                    "total_exp": total_exp,
+                    "current_level": compute_level(total_exp)[0],
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+
+        alive_cnt = len(alive_ids3)
+        await update.message.reply_text(
+            f"검거 성공! {MAFIA_CATCH_REWARD_EXP}EXP를 획득했습니다. 현재 생존마피아 ({alive_cnt}/{MAFIA_PER_CHAT})"
         )
         return
 
@@ -2667,6 +2816,212 @@ def ordinal_emoji(n: int) -> str:
     return {1: "1️⃣", 2: "2️⃣", 3: "3️⃣"}.get(n, f"{n}️⃣")
 
 
+MAFIA_STEAL_EXP = 150
+MAFIA_CATCH_REWARD_EXP = 500
+MAFIA_PER_CHAT = 2
+
+
+def _display_from_udata_or_docid(udata: Dict[str, Any], doc_id: str) -> str:
+    return str(
+        udata.get("display")
+        or (f"@{udata.get('username')}" if udata.get("username") else "")
+        or doc_id
+    )
+
+
+def _is_recent_active(udata: Dict[str, Any], now: datetime) -> bool:
+    last_seen = udata.get("last_seen")
+    if not last_seen:
+        return False
+    try:
+        return last_seen > now - timedelta(hours=48)
+    except Exception:
+        return False
+
+
+def _mafia_alive_count(cdata: Dict[str, Any]) -> int:
+    alive = cdata.get("mafia_alive_ids")
+    if not isinstance(alive, list):
+        return 0
+    return len([x for x in alive if isinstance(x, int)])
+
+
+async def mafia_rollover_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = get_firebase_client()
+    dt = now_kst()
+    today = kst_date_str(dt)
+
+    allowed = get_allowed_chat_id()
+    chats: List[Any]
+    if allowed is not None:
+        chats = [db.collection("chats").document(str(int(allowed))).get()]
+        chats = [c for c in chats if c.exists]
+    else:
+        chats = list(db.collection("chats").stream())
+
+    for cdoc in chats:
+        cdata = cdoc.to_dict() or {}
+        chat_id = cdata.get("chat_id")
+        if not chat_id:
+            continue
+
+        users = list(cdoc.reference.collection("users").stream())
+        candidates: List[int] = []
+        for udoc in users:
+            udata = udoc.to_dict() or {}
+            uid = int(udata.get("user_id", int(udoc.id)))
+            if _is_recent_active(udata, dt):
+                candidates.append(uid)
+
+        if len(candidates) < MAFIA_PER_CHAT:
+            candidates = []
+            for udoc in users:
+                udata = udoc.to_dict() or {}
+                uid = int(udata.get("user_id", int(udoc.id)))
+                candidates.append(uid)
+
+        mafia_ids: List[int] = []
+        if len(set(candidates)) >= MAFIA_PER_CHAT:
+            mafia_ids = random.sample(list(set(candidates)), MAFIA_PER_CHAT)
+        else:
+            mafia_ids = list(set(candidates))
+
+        cdoc.reference.set(
+            {
+                "mafia_date": today,
+                "mafia_alive_ids": mafia_ids,
+                "last_seen": dt,
+            },
+            merge=True,
+        )
+
+        alive_cnt = len(mafia_ids)
+        try:
+            await context.bot.send_message(
+                chat_id=int(chat_id),
+                text=(
+                    "새로운 랜덤마피아 두명이 선정되었습니다."
+                    "마피아는 잡히기 전까지 오전11시 오후3시 오후8시 랜덤유저의 EXP를 강탈합니다. "
+                    f"현재 생존마피아 ({alive_cnt}/{MAFIA_PER_CHAT})"
+                ),
+            )
+        except Exception:
+            continue
+
+
+async def mafia_night_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = get_firebase_client()
+    dt = now_kst()
+    today = kst_date_str(dt)
+
+    allowed = get_allowed_chat_id()
+    chats: List[Any]
+    if allowed is not None:
+        chats = [db.collection("chats").document(str(int(allowed))).get()]
+        chats = [c for c in chats if c.exists]
+    else:
+        chats = list(db.collection("chats").stream())
+
+    for cdoc in chats:
+        cdata = cdoc.to_dict() or {}
+        chat_id = cdata.get("chat_id")
+        if not chat_id:
+            continue
+
+        alive_ids = cdata.get("mafia_alive_ids")
+        if not isinstance(alive_ids, list):
+            alive_ids = []
+        alive_ids = [int(x) for x in alive_ids if isinstance(x, int)]
+        alive_cnt = len(alive_ids)
+
+        try:
+            await context.bot.send_message(
+                chat_id=int(chat_id),
+                text=(
+                    "마피아의 밤이 왔습니다. 마피아는 잡히기 전까지 오전11시 오후3시 오후8시에 각각 랜덤유저 한명의 EXP를 강탈합니다. "
+                    f"현재 생존마피아 ({alive_cnt}/{MAFIA_PER_CHAT})"
+                ),
+            )
+        except Exception:
+            pass
+
+        if alive_cnt <= 0:
+            continue
+
+        users = list(cdoc.reference.collection("users").stream())
+        user_docs: Dict[int, Any] = {}
+        for udoc in users:
+            udata = udoc.to_dict() or {}
+            uid = int(udata.get("user_id", int(udoc.id)))
+            user_docs[uid] = udoc
+
+        victim_pool: List[int] = []
+        for uid, udoc in user_docs.items():
+            if uid in alive_ids:
+                continue
+            udata = udoc.to_dict() or {}
+            if int(udata.get("total_exp", 0)) <= 0:
+                continue
+            victim_pool.append(uid)
+
+        if not victim_pool:
+            continue
+
+        for mafia_id in alive_ids:
+            if not victim_pool:
+                break
+            victim_id = random.choice(victim_pool)
+            victim_pool = [x for x in victim_pool if x != victim_id]
+
+            mdoc = user_docs.get(mafia_id)
+            vdoc = user_docs.get(victim_id)
+            if mdoc is None or vdoc is None:
+                continue
+
+            mdata = mdoc.to_dict() or {}
+            vdata = vdoc.to_dict() or {}
+
+            vexp = int(vdata.get("total_exp", 0))
+            steal = min(MAFIA_STEAL_EXP, max(0, vexp))
+            if steal <= 0:
+                continue
+
+            victim_disp = _display_from_udata_or_docid(vdata, str(victim_id))
+            try:
+                await context.bot.send_message(
+                    chat_id=int(chat_id),
+                    text=(
+                        f"마피아가 {victim_disp} 의 {steal}EXP를 주머니에 챙겼습니다. "
+                        "리더보드가 나올때 사람들의 EXP를 잘 체크하여 추리해보세요."
+                    ),
+                )
+            except Exception:
+                pass
+
+            v_new = vexp - steal
+            mexp = int(mdata.get("total_exp", 0))
+            m_new = mexp + steal
+
+            vdoc.reference.set(
+                {
+                    "total_exp": v_new,
+                    "current_level": compute_level(v_new)[0],
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+            mdoc.reference.set(
+                {
+                    "total_exp": m_new,
+                    "current_level": compute_level(m_new)[0],
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+
+
 async def send_leaderboard(context: ContextTypes.DEFAULT_TYPE) -> None:
     db = get_firebase_client()
     dt = now_kst()
@@ -2763,6 +3118,10 @@ def main() -> None:
     from zoneinfo import ZoneInfo
  
     kst = ZoneInfo(KST_TZ)
+    application.job_queue.run_daily(mafia_rollover_job, time=time(0, 0, tzinfo=kst))
+    application.job_queue.run_daily(mafia_night_job, time=time(11, 0, tzinfo=kst))
+    application.job_queue.run_daily(mafia_night_job, time=time(15, 0, tzinfo=kst))
+    application.job_queue.run_daily(mafia_night_job, time=time(20, 0, tzinfo=kst))
     application.job_queue.run_daily(send_fever_start, time=time(19, 0, tzinfo=kst))
     application.job_queue.run_daily(send_fever_end, time=time(23, 0, tzinfo=kst))
     application.job_queue.run_daily(send_leaderboard, time=time(10, 0, tzinfo=kst))
