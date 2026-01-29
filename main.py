@@ -729,6 +729,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "!TGE": "tge",
         "!스트레스": "stress",
         "!펭귄": "penguin",
+        "!사무엘잭슨": "samuel_jackson",
         "!왈렛그는감히전설이라할수있다": "whalet_legend",
         "!엄마": "mom",
         "!감자탕": "gamjatang",
