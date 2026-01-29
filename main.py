@@ -137,6 +137,26 @@ def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def mask_treasure_hint(cmd: str) -> str:
+    keep = set(["!", ","])
+    chars = list(cmd)
+    idxs = [i for i, ch in enumerate(chars) if ch not in keep]
+    if not idxs:
+        return cmd
+    reveal_cnt = max(1, int(round(len(idxs) * 0.35)))
+    reveal_cnt = min(reveal_cnt, len(idxs))
+    reveal = set(random.sample(idxs, reveal_cnt))
+    out: List[str] = []
+    for i, ch in enumerate(chars):
+        if ch in keep:
+            out.append(ch)
+        elif i in reveal:
+            out.append(ch)
+        else:
+            out.append("ㅁ")
+    return "".join(out)
+
+
 def compute_level(total_exp: int) -> Tuple[int, int, int]:
     level = 1
     need = 100
@@ -765,6 +785,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 merge=True,
             )
         await update.message.reply_text(f"아직 숨겨져있는 보물은 총 {remaining}개 입니다.")
+        return
+
+    if text.strip() == "!보물힌트":
+        chat_id = int(update.effective_chat.id)
+        db = get_firebase_client()
+        dt = now_kst()
+        async with get_chat_lock(chat_id):
+            cref = chat_ref(db, chat_id)
+            csnap = cref.get()
+            cdata = csnap.to_dict() if csnap.exists else {}
+            found = cdata.get("treasures_found_global")
+            if not isinstance(found, dict):
+                found = {}
+            remaining_cmds: List[str] = []
+            for cmd, key in treasure_map.items():
+                if not found.get(key):
+                    remaining_cmds.append(cmd)
+            cref.set(
+                {
+                    "chat_id": chat_id,
+                    "last_seen": dt,
+                },
+                merge=True,
+            )
+
+        if not remaining_cmds:
+            await update.message.reply_text("남은 보물이 없습니다.")
+            return
+        pick = random.choice(remaining_cmds)
+        hint = mask_treasure_hint(pick)
+        await update.message.reply_text(f"남은 보물의 명령어는 {hint} 입니다.")
         return
     tkey = treasure_map.get(text.strip())
     if tkey is not None:
