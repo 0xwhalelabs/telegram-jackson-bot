@@ -732,12 +732,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "!왈렛그는감히전설이라할수있다": "whalet_legend",
         "!엄마": "mom",
         "!감자탕": "gamjatang",
-        "!펍펍펍펍펍펍펍펍펍펍펍펍펍펍": "pubpub",
+        "!펍펍펍펍펍펍펍펍펭펍펍펍펍펍": "pubpub",
         "!트레이드에브리띵스펜드에브리웨어": "trade_everything_spend_everywhere",
         "!트레이드에브리띵스펜드에브리웨어,": "trade_everything_spend_everywhere",
         "!보물내놔": "give_me_treasure",
         "!팬티속보물": "panty_treasure",
     }
+
+    if text.strip() == "!남은보물":
+        chat_id = int(update.effective_chat.id)
+        db = get_firebase_client()
+        dt = now_kst()
+        async with get_chat_lock(chat_id):
+            cref = chat_ref(db, chat_id)
+            csnap = cref.get()
+            cdata = csnap.to_dict() if csnap.exists else {}
+            found = cdata.get("treasures_found_global")
+            if not isinstance(found, dict):
+                found = {}
+            total_cnt = len(set(treasure_map.values()))
+            found_cnt = 0
+            for k in set(treasure_map.values()):
+                if found.get(k):
+                    found_cnt += 1
+            remaining = max(0, total_cnt - found_cnt)
+            cref.set(
+                {
+                    "chat_id": chat_id,
+                    "last_seen": dt,
+                },
+                merge=True,
+            )
+        await update.message.reply_text(f"아직 숨겨져있는 보물은 총 {remaining}개 입니다.")
+        return
     tkey = treasure_map.get(text.strip())
     if tkey is not None:
         if is_anonymous_admin_message(update):
