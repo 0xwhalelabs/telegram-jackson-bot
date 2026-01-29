@@ -396,6 +396,68 @@ SWORD_TABLE: Dict[int, Dict[str, Any]] = {
 }
 
 
+def sword_sell_price(lvl: int) -> Optional[int]:
+    row = SWORD_TABLE.get(int(lvl))
+    if not row:
+        return None
+    sell = row.get("sell")
+    if sell is None:
+        return None
+    return int(sell)
+
+
+DEFENSE_TICKET_TTL_SECONDS = 24 * 60 * 60
+
+
+def _coerce_dt(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value
+    return None
+
+
+def defense_tickets_list_from_udata(
+    udata: Dict[str, Any], now: datetime
+) -> Tuple[List[datetime], bool]:
+    changed = False
+    raw_list = udata.get("defense_tickets_list")
+    tickets: List[datetime] = []
+    if isinstance(raw_list, list):
+        for v in raw_list:
+            dtv = _coerce_dt(v)
+            if dtv is not None:
+                tickets.append(dtv)
+
+    old_cnt = int(udata.get("defense_tickets", 0))
+    if old_cnt > 0 and not tickets:
+        exp = now + timedelta(seconds=DEFENSE_TICKET_TTL_SECONDS)
+        tickets = [exp for _ in range(old_cnt)]
+        changed = True
+
+    before = len(tickets)
+    tickets = [t for t in tickets if t > now]
+    if len(tickets) != before:
+        changed = True
+
+    tickets.sort()
+    if raw_list is not None and isinstance(raw_list, list):
+        if len(raw_list) != len(tickets):
+            changed = True
+
+    return tickets, changed
+
+
+def defense_tickets_count(udata: Dict[str, Any], now: datetime) -> int:
+    tickets, _ = defense_tickets_list_from_udata(udata, now)
+    return len(tickets)
+
+
+def _format_remaining_hhmm(seconds: int) -> str:
+    s = max(0, int(seconds))
+    h = s // 3600
+    m = (s % 3600) // 60
+    return f"{h:02d}:{m:02d}"
+
+
 def sword_state_from_udata(udata: Dict[str, Any]) -> Tuple[int, int]:
     lvl = int(udata.get("sword_level", 0))
     if lvl < SWORD_NONE_LEVEL:
@@ -1446,19 +1508,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             uref = user_ref(db, chat_id, user_id)
             snap = uref.get()
             udata = snap.to_dict() if snap.exists else {}
-            lvl, tickets = sword_state_from_udata(udata)
+            dt = now_kst()
+            lvl, _ = sword_state_from_udata(udata)
+            tickets_list, t_changed = defense_tickets_list_from_udata(udata, dt)
+            tickets = len(tickets_list)
             username = update.effective_user.username
             display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+
+            if t_changed:
+                uref.set(
+                    {
+                        "defense_tickets_list": tickets_list,
+                        "defense_tickets": tickets,
+                        "last_seen": dt,
+                    },
+                    merge=True,
+                )
             if lvl == SWORD_NONE_LEVEL:
-                await update.message.reply_text(
-                    f"{display}님 현재 검이 없습니다.\n"
-                    f"강화 방어티켓: {tickets}장"
-                )
+                lines = [f"{display}님 현재 검이 없습니다.", f"강화 방어티켓: {tickets}장"]
             else:
-                await update.message.reply_text(
-                    f"{display}님 현재소유 검 [{sword_name(lvl)}]이 있습니다.\n"
-                    f"강화 방어티켓: {tickets}장"
-                )
+                lines = [
+                    f"{display}님 현재소유 검 [{sword_name(lvl)}]이 있습니다.",
+                    f"강화 방어티켓: {tickets}장",
+                ]
+
+            for i, exp_at in enumerate(tickets_list, start=1):
+                remain = int((exp_at - dt).total_seconds())
+                lines.append(f"방어권{i} : {_format_remaining_hhmm(remain)} 남음")
+
+            await update.message.reply_text("\n".join(lines))
         return
 
     if text.strip() == "!강화확률":
@@ -1531,10 +1609,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user_id = int(update.effective_user.id)
         async with get_user_lock(chat_id, user_id):
             db = get_firebase_client()
+            dt = now_kst()
             uref = user_ref(db, chat_id, user_id)
             snap = uref.get()
             udata = snap.to_dict() if snap.exists else {}
-            lvl, tickets = sword_state_from_udata(udata)
+            lvl, _ = sword_state_from_udata(udata)
+            tickets_list, t_changed = defense_tickets_list_from_udata(udata, dt)
+            tickets = len(tickets_list)
+            if t_changed:
+                uref.set(
+                    {
+                        "defense_tickets_list": tickets_list,
+                        "defense_tickets": tickets,
+                        "last_seen": dt,
+                    },
+                    merge=True,
+                )
             nxt = sword_next_upgrade_info(lvl)
             username = update.effective_user.username
             display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
@@ -1546,6 +1636,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 return
             nxt_level, rate, cost, sell, nxt_name = nxt
             sell_txt = "판매 불가" if sell is None else f"{int(sell)}EXP"
+
+            extra_lines: List[str] = []
+            for i, exp_at in enumerate(tickets_list, start=1):
+                remain = int((exp_at - dt).total_seconds())
+                extra_lines.append(f"방어권{i} : {_format_remaining_hhmm(remain)} 남음")
+            extra_txt = "\n" + "\n".join(extra_lines) if extra_lines else ""
             kb = InlineKeyboardMarkup(
                 [
                     [
@@ -1564,7 +1660,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"{display}님의 [{sword_name(lvl)}]을 강화 하시겠습니까?\n"
                 f"강화확률 {rate*100:.2f}%, 강화비용 {int(cost)}exp\n"
                 f"강화 후 검[{nxt_name}] 당근마켓 시세 {sell_txt}\n"
-                f"보유 방어티켓: {tickets}장",
+                f"보유 방어티켓: {tickets}장" + extra_txt,
                 reply_markup=kb,
             )
         return
@@ -2013,12 +2109,51 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
         if defense_counter >= int(defense_target):
             defense_counter = 0
             defense_target = random.randint(400, 600)
-            lvl0, tickets0 = sword_state_from_udata(udata)
-            tickets0 += 1
-            uref.set({"sword_level": lvl0, "defense_tickets": tickets0}, merge=True)
+            lvl0, _ = sword_state_from_udata(udata)
+            tickets_list, _ = defense_tickets_list_from_udata(udata, dt)
+            tickets_list.append(dt + timedelta(seconds=DEFENSE_TICKET_TTL_SECONDS))
+            tickets_list.sort()
+            tickets0 = len(tickets_list)
+            uref.set(
+                {
+                    "sword_level": lvl0,
+                    "defense_tickets_list": tickets_list,
+                    "defense_tickets": tickets0,
+                },
+                merge=True,
+            )
             await update.effective_chat.send_message(
                 "띠링! 강화 방어티켓을 한장 부여합니다."
             )
+        easter_done = bool(cdata2.get("easter_bisd_done", False))
+        easter_step = int(cdata2.get("easter_bisd_step", 0))
+        easter_user_ids = cdata2.get("easter_bisd_user_ids")
+        if not isinstance(easter_user_ids, list):
+            easter_user_ids = []
+        easter_user_ids = [int(x) for x in easter_user_ids if isinstance(x, int)]
+
+        easter_winners: Optional[List[int]] = None
+        if not easter_done:
+            expected = ["베", "이", "스", "드"]
+            token = (text or "").strip()
+            if token == expected[min(max(easter_step, 0), 3)] and len(token) == 1:
+                if int(user_id) in easter_user_ids:
+                    easter_step = 0
+                    easter_user_ids = []
+                else:
+                    easter_user_ids = easter_user_ids + [int(user_id)]
+                    easter_step += 1
+                    if easter_step >= 4:
+                        easter_done = True
+                        easter_step = 4
+                        easter_winners = list(easter_user_ids)
+            else:
+                easter_step = 0
+                easter_user_ids = []
+
+        if easter_winners is not None:
+            context.chat_data["easter_bisd_winners"] = easter_winners
+
         cref.set(
             {
                 "chat_id": chat_id,
@@ -2028,6 +2163,9 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
                 "defense_counter": defense_counter,
                 "defense_target": defense_target,
                 "edison_counter": edison_counter,
+                "easter_bisd_done": easter_done,
+                "easter_bisd_step": easter_step,
+                "easter_bisd_user_ids": easter_user_ids,
             },
             merge=True,
         )
@@ -2044,6 +2182,31 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
                 await update.effective_chat.send_message(m)
             except Exception:
                 pass
+
+    winners = context.chat_data.pop("easter_bisd_winners", None)
+    if isinstance(winners, list) and winners:
+        for wid in winners:
+            async with get_user_lock(chat_id, int(wid)):
+                wref = user_ref(db, chat_id, int(wid))
+                wsnap = wref.get()
+                wdata = wsnap.to_dict() if wsnap.exists else {}
+                total0 = int(wdata.get("total_exp", 0))
+                total1 = total0 + int(EASTER_BISD_REWARD_EXP)
+                wref.set(
+                    {
+                        "total_exp": total1,
+                        "current_level": compute_level(total1)[0],
+                        "last_seen": dt,
+                        "last_active_date": today,
+                    },
+                    merge=True,
+                )
+        try:
+            await update.effective_chat.send_message(
+                "띠링, 1회성 이스터에그 발견. 굉장한 모험가들이 숨겨진 이스터에그를 발견하였습니다. 해당 모험가들에게 2000EXP를 지급합니다."
+            )
+        except Exception:
+            pass
 
     cur_text = (text or "").strip()
 
@@ -2714,7 +2877,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             uref = user_ref(db, chat_id, target_user_id)
             snap = uref.get()
             udata = snap.to_dict() if snap.exists else {}
-            lvl, tickets = sword_state_from_udata(udata)
+            dt = now_kst()
+            lvl, _ = sword_state_from_udata(udata)
+            tickets_list, t_changed = defense_tickets_list_from_udata(udata, dt)
+            tickets = len(tickets_list)
             if lvl != SWORD_NONE_LEVEL:
                 await q.message.edit_text("이미 검을 보유 중입니다.")
                 return
@@ -2731,6 +2897,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "total_exp": total_exp,
                     "current_level": new_level,
                     "sword_level": BASED_MALL_SWORD_LEVEL,
+                    "defense_tickets_list": tickets_list,
                     "defense_tickets": tickets,
                 },
                 merge=True,
@@ -2764,7 +2931,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             uref = user_ref(db, chat_id, target_user_id)
             snap = uref.get()
             udata = snap.to_dict() if snap.exists else {}
-            lvl, tickets = sword_state_from_udata(udata)
+            dt = now_kst()
+            lvl, _ = sword_state_from_udata(udata)
+            tickets_list, t_changed = defense_tickets_list_from_udata(udata, dt)
+            tickets = len(tickets_list)
             if lvl == SWORD_NONE_LEVEL:
                 await q.message.edit_text("현재 검이 없습니다.")
                 return
@@ -2780,6 +2950,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "total_exp": new_total,
                     "current_level": new_level,
                     "sword_level": SWORD_NONE_LEVEL,
+                    "defense_tickets_list": tickets_list,
                     "defense_tickets": tickets,
                 },
                 merge=True,
@@ -2810,7 +2981,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             uref = user_ref(db, chat_id, target_user_id)
             snap = uref.get()
             udata = snap.to_dict() if snap.exists else {}
-            lvl, tickets = sword_state_from_udata(udata)
+            dt = now_kst()
+            lvl, _ = sword_state_from_udata(udata)
+            tickets_list, t_changed = defense_tickets_list_from_udata(udata, dt)
+            tickets = len(tickets_list)
+            if t_changed:
+                uref.set(
+                    {
+                        "defense_tickets_list": tickets_list,
+                        "defense_tickets": tickets,
+                        "last_seen": dt,
+                    },
+                    merge=True,
+                )
             if lvl == SWORD_NONE_LEVEL:
                 await q.message.edit_text("현재 검이 없습니다.")
                 return
@@ -2838,7 +3021,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     f"받은 캐시백 : {cashback}EXP"
                 )
                 if tickets > 0:
-                    tickets -= 1
+                    tickets_list = tickets_list[1:]
+                    tickets = len(tickets_list)
                     lvl2 = lvl
                     msg = "강화 실패! 방어티켓 1장을 사용하여 검이 복구되었습니다.\n" + cashback_msg
                 else:
@@ -2851,6 +3035,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "total_exp": total_exp,
                     "current_level": new_level,
                     "sword_level": lvl2,
+                    "defense_tickets_list": tickets_list,
                     "defense_tickets": tickets,
                 },
                 merge=True,
@@ -2942,6 +3127,8 @@ def ordinal_emoji(n: int) -> str:
 MAFIA_STEAL_EXP = 150
 MAFIA_CATCH_REWARD_EXP = 500
 MAFIA_PER_CHAT = 2
+
+EASTER_BISD_REWARD_EXP = 2000
 
 
 def _display_from_udata_or_docid(udata: Dict[str, Any], doc_id: str) -> str:
