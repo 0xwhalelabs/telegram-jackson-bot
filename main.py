@@ -284,7 +284,7 @@ PALS_STAGE_FOLDER: Dict[str, str] = {
     "baby": "baby",
     "teen": "child",
     "adult": "adult",
-    "ultimate": "drake",
+    "ultimate": "gg",
 }
 
 PALS_EVOLVE_AT: Dict[str, int] = {
@@ -3041,36 +3041,167 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 merge=True,
             )
 
-        can_continue = lvl2 != SWORD_NONE_LEVEL and sword_next_upgrade_info(lvl2) is not None
-        kb2 = (
-            InlineKeyboardMarkup(
+        if lvl2 == SWORD_NONE_LEVEL:
+            kb2 = InlineKeyboardMarkup(
                 [
                     [
                         InlineKeyboardButton(
-                            text="한번 더 강화",
-                            callback_data=f"sword_enhance:{chat_id}:{uid}:yes",
+                            text=f"나무 검 사기 ({BASED_MALL_PRICE_EXP}EXP)",
+                            callback_data=f"sword_buy_wood:{chat_id}:{uid}",
                         ),
                         InlineKeyboardButton(
-                            text="그만",
+                            text="나가기",
                             callback_data=f"sword_enhance_stop:{chat_id}:{uid}",
                         ),
                     ]
                 ]
             )
-            if can_continue
-            else None
-        )
-
-        if lvl2 == SWORD_NONE_LEVEL:
             await q.message.edit_text(
                 f"{msg}\n남은 방어티켓: {tickets}장",
                 reply_markup=kb2,
             )
         else:
+            can_continue = sword_next_upgrade_info(lvl2) is not None
+            row: List[InlineKeyboardButton] = []
+            if can_continue:
+                row.append(
+                    InlineKeyboardButton(
+                        text="한번 더 강화",
+                        callback_data=f"sword_enhance:{chat_id}:{uid}:yes",
+                    )
+                )
+            row.append(
+                InlineKeyboardButton(
+                    text="판매하기",
+                    callback_data=f"sword_sell_prompt:{chat_id}:{uid}",
+                )
+            )
+            row.append(
+                InlineKeyboardButton(
+                    text="취소",
+                    callback_data=f"sword_enhance_stop:{chat_id}:{uid}",
+                )
+            )
+            kb2 = InlineKeyboardMarkup([row])
             await q.message.edit_text(
                 f"{msg}\n현재 검: [{sword_name(lvl2)}]\n남은 방어티켓: {tickets}장",
                 reply_markup=kb2,
             )
+        return
+
+    if data.startswith("sword_sell_prompt:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            return
+        _, cid, uid = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("명령어를 친 본인만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+
+        db = get_firebase_client()
+        target_user_id = int(uid)
+        async with get_user_lock(chat_id, target_user_id):
+            uref = user_ref(db, chat_id, target_user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            lvl, _ = sword_state_from_udata(udata)
+            if lvl == SWORD_NONE_LEVEL:
+                await q.message.edit_text("현재 검이 없습니다.")
+                return
+            price = sword_sell_price(lvl)
+            if price is None:
+                await q.message.edit_text("현재 검은 판매 불가입니다.")
+                return
+
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="판매하기",
+                        callback_data=f"sword_sell:{chat_id}:{uid}:yes",
+                    ),
+                    InlineKeyboardButton(
+                        text="취소",
+                        callback_data=f"sword_enhance_stop:{chat_id}:{uid}",
+                    ),
+                ]
+            ]
+        )
+        await q.message.edit_text(
+            f"현재 소유한 [{sword_name(lvl)}]을 파시겠습니까? 판매가격 {int(price)}EXP",
+            reply_markup=kb,
+        )
+        return
+
+    if data.startswith("sword_buy_wood:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            return
+        _, cid, uid = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("명령어를 친 본인만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+
+        db = get_firebase_client()
+        target_user_id = int(uid)
+        async with get_user_lock(chat_id, target_user_id):
+            uref = user_ref(db, chat_id, target_user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            dt = now_kst()
+            lvl, _ = sword_state_from_udata(udata)
+            tickets_list, _ = defense_tickets_list_from_udata(udata, dt)
+            tickets = len(tickets_list)
+            if lvl != SWORD_NONE_LEVEL:
+                await q.message.edit_text("이미 검을 보유 중입니다.")
+                return
+
+            total_exp = int(udata.get("total_exp", 0))
+            if total_exp < BASED_MALL_PRICE_EXP:
+                await q.message.edit_text(f"EXP가 부족합니다. (필요 {BASED_MALL_PRICE_EXP}EXP)")
+                return
+
+            total_exp -= BASED_MALL_PRICE_EXP
+            new_level = compute_level(total_exp)[0]
+            uref.set(
+                {
+                    "total_exp": total_exp,
+                    "current_level": new_level,
+                    "sword_level": BASED_MALL_SWORD_LEVEL,
+                    "defense_tickets_list": tickets_list,
+                    "defense_tickets": tickets,
+                },
+                merge=True,
+            )
+
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="강화하기",
+                        callback_data=f"sword_enhance:{chat_id}:{uid}:yes",
+                    ),
+                    InlineKeyboardButton(
+                        text="취소",
+                        callback_data=f"sword_enhance_stop:{chat_id}:{uid}",
+                    ),
+                ]
+            ]
+        )
+        await q.message.edit_text(
+            f"구매 완료! [{sword_name(BASED_MALL_SWORD_LEVEL)}] 지급 완료. (-{BASED_MALL_PRICE_EXP}EXP)",
+            reply_markup=kb,
+        )
         return
 
     if data.startswith("sword_enhance_stop:"):
