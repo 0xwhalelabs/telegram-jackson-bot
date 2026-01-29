@@ -928,6 +928,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if text.strip() == "!마피아현황":
+        chat_id = int(update.effective_chat.id)
+        dt = now_kst()
+        today = kst_date_str(dt)
+        db = get_firebase_client()
+        cref = chat_ref(db, chat_id)
+        async with get_chat_lock(chat_id):
+            csnap = cref.get()
+            cdata = csnap.to_dict() if csnap.exists else {}
+            mafia_cleared_date = cdata.get("mafia_cleared_date")
+            mafia_date = cdata.get("mafia_date")
+            alive_ids = cdata.get("mafia_alive_ids")
+            if not isinstance(alive_ids, list):
+                alive_ids = []
+            alive_ids = [int(x) for x in alive_ids if isinstance(x, int)]
+            if mafia_cleared_date != today and (mafia_date != today or not alive_ids):
+                users = list(cref.collection("users").stream())
+                mafia_ids = _select_mafia_ids(users, dt)
+                alive_ids = mafia_ids
+                cref.set(
+                    {
+                        "mafia_date": today,
+                        "mafia_alive_ids": mafia_ids,
+                        "mafia_cleared_date": None,
+                        "last_seen": dt,
+                    },
+                    merge=True,
+                )
+        await update.message.reply_text(
+            f"현재 남은 마피아는 ({len(alive_ids)}/{MAFIA_PER_CHAT})명입니다."
+        )
+        return
+
     if text.strip().startswith("!검거"):
         if update.effective_chat is None or update.effective_user is None:
             return
@@ -1048,6 +1081,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 {
                     "mafia_alive_ids": alive_ids3,
                     "mafia_date": today,
+                    "mafia_cleared_date": today if len(alive_ids3) == 0 else None,
                     "last_seen": dt,
                 },
                 merge=True,
@@ -2846,6 +2880,68 @@ def _mafia_alive_count(cdata: Dict[str, Any]) -> int:
     return len([x for x in alive if isinstance(x, int)])
 
 
+def _select_mafia_ids(user_docs: List[Any], now: datetime) -> List[int]:
+    candidates: List[int] = []
+    for udoc in user_docs:
+        udata = udoc.to_dict() or {}
+        uid = int(udata.get("user_id", int(udoc.id)))
+        if _is_recent_active(udata, now):
+            candidates.append(uid)
+
+    if len(candidates) < MAFIA_PER_CHAT:
+        candidates = []
+        for udoc in user_docs:
+            udata = udoc.to_dict() or {}
+            uid = int(udata.get("user_id", int(udoc.id)))
+            candidates.append(uid)
+
+    if len(set(candidates)) >= MAFIA_PER_CHAT:
+        return random.sample(list(set(candidates)), MAFIA_PER_CHAT)
+    return list(set(candidates))
+
+
+async def mafia_ensure_initialized_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = get_firebase_client()
+    dt = now_kst()
+    today = kst_date_str(dt)
+
+    allowed = get_allowed_chat_id()
+    chats: List[Any]
+    if allowed is not None:
+        chats = [db.collection("chats").document(str(int(allowed))).get()]
+        chats = [c for c in chats if c.exists]
+    else:
+        chats = list(db.collection("chats").stream())
+
+    for cdoc in chats:
+        cdata = cdoc.to_dict() or {}
+        chat_id = cdata.get("chat_id")
+        if not chat_id:
+            continue
+        mafia_cleared_date = cdata.get("mafia_cleared_date")
+        if mafia_cleared_date == today:
+            continue
+        mafia_date = cdata.get("mafia_date")
+        alive_ids = cdata.get("mafia_alive_ids")
+        if not isinstance(alive_ids, list):
+            alive_ids = []
+        alive_cnt = len([x for x in alive_ids if isinstance(x, int)])
+        if mafia_date == today and alive_cnt > 0:
+            continue
+
+        users = list(cdoc.reference.collection("users").stream())
+        mafia_ids = _select_mafia_ids(users, dt)
+        cdoc.reference.set(
+            {
+                "mafia_date": today,
+                "mafia_alive_ids": mafia_ids,
+                "mafia_cleared_date": None,
+                "last_seen": dt,
+            },
+            merge=True,
+        )
+
+
 async def mafia_rollover_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     db = get_firebase_client()
     dt = now_kst()
@@ -2866,30 +2962,13 @@ async def mafia_rollover_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
         users = list(cdoc.reference.collection("users").stream())
-        candidates: List[int] = []
-        for udoc in users:
-            udata = udoc.to_dict() or {}
-            uid = int(udata.get("user_id", int(udoc.id)))
-            if _is_recent_active(udata, dt):
-                candidates.append(uid)
-
-        if len(candidates) < MAFIA_PER_CHAT:
-            candidates = []
-            for udoc in users:
-                udata = udoc.to_dict() or {}
-                uid = int(udata.get("user_id", int(udoc.id)))
-                candidates.append(uid)
-
-        mafia_ids: List[int] = []
-        if len(set(candidates)) >= MAFIA_PER_CHAT:
-            mafia_ids = random.sample(list(set(candidates)), MAFIA_PER_CHAT)
-        else:
-            mafia_ids = list(set(candidates))
+        mafia_ids = _select_mafia_ids(users, dt)
 
         cdoc.reference.set(
             {
                 "mafia_date": today,
                 "mafia_alive_ids": mafia_ids,
+                "mafia_cleared_date": None,
                 "last_seen": dt,
             },
             merge=True,
@@ -3118,6 +3197,7 @@ def main() -> None:
     from zoneinfo import ZoneInfo
  
     kst = ZoneInfo(KST_TZ)
+    application.job_queue.run_once(mafia_ensure_initialized_job, when=5)
     application.job_queue.run_daily(mafia_rollover_job, time=time(0, 0, tzinfo=kst))
     application.job_queue.run_daily(mafia_night_job, time=time(11, 0, tzinfo=kst))
     application.job_queue.run_daily(mafia_night_job, time=time(15, 0, tzinfo=kst))
