@@ -392,7 +392,7 @@ SWORD_TABLE: Dict[int, Dict[str, Any]] = {
     17: {"name": "신의 시험 검", "cost": 8400, "rate": 0.025, "sell": 900000},
     18: {"name": "멸망의 Based 검", "cost": 11200, "rate": 0.015, "sell": 1600000},
     19: {"name": "신화의 끝 검", "cost": 15400, "rate": 0.008, "sell": 3000000},
-    20: {"name": "⚫ 절대자 Based 검", "cost": 21000, "rate": 0.002, "sell": None},
+    20: {"name": "비탈릭 바짓속 불타는 명멸검", "cost": 21000, "rate": 0.002, "sell": None},
 }
 
 
@@ -873,6 +873,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "!트레이드에브리띵스펜드에브리웨어,": "trade_everything_spend_everywhere",
         "!보물내놔": "give_me_treasure",
         "!팬티속보물": "panty_treasure",
+        "!사토시나카모토": "satoshi_nakamoto",
+        "!슬픈젖꼭지증후군": "sad_nipple_syndrome",
+        "!태극기휘날리며": "taegukgi_waving",
+        "!어차피우승은동탄맘": "dontan_mom_wins_anyway",
     }
 
     if text.strip() == "!남은보물":
@@ -904,8 +908,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if text.strip() == "!보물힌트":
         chat_id = int(update.effective_chat.id)
+        user_id = int(update.effective_user.id)
         db = get_firebase_client()
         dt = now_kst()
+        today = kst_date_str(dt)
+
+        async with get_user_lock(chat_id, user_id):
+            uref = user_ref(db, chat_id, user_id)
+            usnap = uref.get()
+            udata = usnap.to_dict() if usnap.exists else {}
+            hdate = udata.get("treasure_hint_date")
+            huses = int(udata.get("treasure_hint_uses_today", 0))
+            if hdate != today:
+                hdate = today
+                huses = 0
+            if huses >= 2:
+                await update.message.reply_text("!보물힌트는 하루에 2번만 사용할 수 있습니다.")
+                return
+
+            huses += 1
+            uref.set(
+                {
+                    "treasure_hint_date": hdate,
+                    "treasure_hint_uses_today": huses,
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+
         async with get_chat_lock(chat_id):
             cref = chat_ref(db, chat_id)
             csnap = cref.get()
