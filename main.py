@@ -3041,12 +3041,55 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 merge=True,
             )
 
+        can_continue = lvl2 != SWORD_NONE_LEVEL and sword_next_upgrade_info(lvl2) is not None
+        kb2 = (
+            InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            text="한번 더 강화",
+                            callback_data=f"sword_enhance:{chat_id}:{uid}:yes",
+                        ),
+                        InlineKeyboardButton(
+                            text="그만",
+                            callback_data=f"sword_enhance_stop:{chat_id}:{uid}",
+                        ),
+                    ]
+                ]
+            )
+            if can_continue
+            else None
+        )
+
         if lvl2 == SWORD_NONE_LEVEL:
-            await q.message.edit_text(f"{msg}\n남은 방어티켓: {tickets}장")
+            await q.message.edit_text(
+                f"{msg}\n남은 방어티켓: {tickets}장",
+                reply_markup=kb2,
+            )
         else:
             await q.message.edit_text(
-                f"{msg}\n현재 검: [{sword_name(lvl2)}]\n남은 방어티켓: {tickets}장"
+                f"{msg}\n현재 검: [{sword_name(lvl2)}]\n남은 방어티켓: {tickets}장",
+                reply_markup=kb2,
             )
+        return
+
+    if data.startswith("sword_enhance_stop:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            return
+        _, cid, uid = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("명령어를 친 본인만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+        try:
+            await q.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         return
 
 
