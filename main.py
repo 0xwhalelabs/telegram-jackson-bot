@@ -888,6 +888,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "!인직만숙불쑥": "injik_mansuk_bulsuk",
         "!인직만숙겸상": "injik_mansuk_gyeomsang",
         "!어벤져스와마법사의돌": "avengers_and_sorcerers_stone",
+        "!아쉬워벌써열두시삼육분": "already_0036",
+        "!내이름은고난함정이죠": "my_name_is_gonan_trap",
+        "!어떻게이별까지사랑하겠누": "how_to_love_even_breakup",
+        "!불꽃카리스마원식": "fire_charisma_wonsik",
+        "!뉴모노울트라마이크로스코픽실리코볼케이노코니오시스": "pneumonoultramicroscopicsilicovolcanoconiosis",
+        "!그런데말의해입니다": "by_the_way_year_of_horse",
+        "!오이보다가지가맛있다": "eggplant_better_than_cucumber",
+        "!견우야미안해나도어쩔수없는여자인가봐": "gyeonwoo_sorry_cant_help_it_woman",
+        "!엄마미안해나도어쩔수없는흑우인가봐": "mom_sorry_cant_help_it_black_cow",
     }
 
     if text.strip() == "!남은보물":
@@ -1591,6 +1600,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             lines.append(
                 f"{lvl}강: {row['name']} | 확률 {rate:.2f}%"
             )
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    if text.strip() == "!강화비용":
+        lines: List[str] = ["[검 강화비용/판매가]"]
+        for lvl in range(0, SWORD_MAX_LEVEL + 1):
+            row = SWORD_TABLE.get(lvl)
+            if not row:
+                continue
+            name = str(row.get("name") or "")
+            cost = int(row.get("cost") or 0)
+            sell = row.get("sell")
+            sell_txt = "판매 불가" if sell is None else f"{int(sell)}EXP"
+            lines.append(f"{lvl}강 {name}")
+            lines.append(f"- 강화비용: {cost}EXP")
+            lines.append(f"- 판매가: {sell_txt}")
+            lines.append("")
+        if lines and lines[-1] == "":
+            lines = lines[:-1]
         await update.message.reply_text("\n".join(lines))
         return
 
