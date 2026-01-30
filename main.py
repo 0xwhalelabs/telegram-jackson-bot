@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import os
@@ -153,7 +154,7 @@ def mask_treasure_hint(cmd: str) -> str:
         elif i in reveal:
             out.append(ch)
         else:
-            out.append("ㅁ")
+            out.append("☆")
     return "".join(out)
 
 
@@ -797,6 +798,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if update.effective_chat.type == ChatType.PRIVATE:
         text = update.message.text
+        if text.strip().startswith("!보물추가"):
+            if not is_owner(update):
+                await update.message.reply_text("권한이 없습니다.")
+                return
+            allowed = get_allowed_chat_id()
+            if allowed is None:
+                await update.message.reply_text("설정된 채팅이 없습니다.")
+                return
+
+            parts = text.strip().split()
+            cmds = [p.strip() for p in parts[1:] if p.strip()]
+            if not cmds:
+                await update.message.reply_text("추가할 보물 명령어를 같이 입력해 주세요. 예) !보물추가 !사랑그리고평화")
+                return
+
+            for c in cmds:
+                if not c.startswith("!") or " " in c or len(c) < 2:
+                    await update.message.reply_text("보물 명령어는 공백 없이 !로 시작해야 합니다. 예) !사랑그리고평화")
+                    return
+
+            db = get_firebase_client()
+            dt = now_kst()
+            async with get_chat_lock(int(allowed)):
+                cref = chat_ref(db, int(allowed))
+                csnap = cref.get()
+                cdata = csnap.to_dict() if csnap.exists else {}
+                extra = cdata.get("extra_treasure_map")
+                if not isinstance(extra, dict):
+                    extra = {}
+                extra2 = dict(extra)
+                added = 0
+                skipped = 0
+                for c in cmds:
+                    if c in extra2:
+                        skipped += 1
+                        continue
+                    key = "extra_" + hashlib.md5(c.encode("utf-8")).hexdigest()[:12]
+                    extra2[c] = key
+                    added += 1
+                cref.set(
+                    {
+                        "chat_id": int(allowed),
+                        "extra_treasure_map": extra2,
+                        "last_seen": dt,
+                    },
+                    merge=True,
+                )
+            await update.message.reply_text(f"보물 추가 완료: {added}개 (중복 스킵 {skipped}개)")
+            return
+
         if "마피아" in text and "오늘" in text:
             if not is_owner(update):
                 await update.message.reply_text("권한이 없습니다.")
@@ -849,6 +900,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = update.message.text
+    chat_id = int(update.effective_chat.id)
 
     treasure_map: Dict[str, str] = {
         "!섹스": "sex",
@@ -899,12 +951,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "!엄마미안해나도어쩔수없는흑우인가봐": "mom_sorry_cant_help_it_black_cow",
     }
 
+    db = get_firebase_client()
+    cref = chat_ref(db, chat_id)
+    csnap = cref.get()
+    cdata = csnap.to_dict() if csnap.exists else {}
+    extra = cdata.get("extra_treasure_map")
+    if isinstance(extra, dict):
+        for cmd, key in extra.items():
+            if not isinstance(cmd, str) or not cmd.strip().startswith("!"):
+                continue
+            if not isinstance(key, str) or not key.strip():
+                continue
+            if cmd.strip() in treasure_map:
+                continue
+            treasure_map[cmd.strip()] = key.strip()
+
     if text.strip() == "!남은보물":
-        chat_id = int(update.effective_chat.id)
-        db = get_firebase_client()
         dt = now_kst()
         async with get_chat_lock(chat_id):
-            cref = chat_ref(db, chat_id)
             csnap = cref.get()
             cdata = csnap.to_dict() if csnap.exists else {}
             found = cdata.get("treasures_found_global")
@@ -927,9 +991,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if text.strip() == "!보물힌트":
-        chat_id = int(update.effective_chat.id)
         user_id = int(update.effective_user.id)
-        db = get_firebase_client()
         dt = now_kst()
         today = kst_date_str(dt)
 
@@ -991,9 +1053,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "익명 관리자 모드를 끄고 다시 입력해 주세요."
             )
             return
-        chat_id = int(update.effective_chat.id)
         user_id = int(update.effective_user.id)
-        db = get_firebase_client()
         dt = now_kst()
         today = kst_date_str(dt)
 
