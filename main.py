@@ -1084,7 +1084,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             uref = user_ref(db, chat_id, user_id)
             usnap = uref.get()
             udata = usnap.to_dict() if usnap.exists else {}
-            total_exp = int(udata.get("total_exp", 0)) + 500
+            total_exp = int(udata.get("total_exp", 0)) + TREASURE_REWARD_EXP
             level = compute_level(total_exp)[0]
             uref.set(
                 {
@@ -2677,6 +2677,146 @@ async def pals_payout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
 
+TREASURE_REWARD_EXP = 300
+
+
+TREASURE_DAILY_POOL: List[str] = [
+    "!어벤져스어셈블",
+    "!나는자연인이다",
+    "!니가가라하와이",
+    "!내가왕이될상인가",
+    "!라떼는말이야",
+    "!인생은실전이야",
+    "!나의검은당신의것이오",
+    "!내가빙다리핫바지로보이냐",
+    "!비탈릭바짓속불타는명멸검",
+    "!너내동료가돼라",
+    "!에디슨의베이스드",
+    "!오늘밤주인공은나야나",
+    "!나는전설이다",
+    "!오늘밤바라본저달이너무처량해",
+    "!저스트두잇나이키",
+    "!시기다른래퍼들의반대편을바라보던",
+    "!스즈메의입단속",
+    "!시간을달리는소녀",
+    "!난이게임을해봤어요",
+    "!이래도지랄저래도지랄",
+    "!아버지날보고있다면정답을알려줘",
+    "!박나래와주사이모",
+    "!차은우의탈세이슈",
+    "!감스트의탈모이슈",
+    "!지금만나러갑니다",
+    "!인생은아름다워",
+    "!라면먹고갈래",
+    "!치키치키차카차카초코초코초",
+    "!다시만난세계",
+    "!이게바로나다",
+    "!지금이순간",
+    "!인생은타이밍",
+    "!아직끝난게아니야",
+    "!내꿈은이루어진다",
+    "!사랑은은하수다방",
+    "!니인생을살아",
+    "!메이크아메리카그레이트어게인",
+    "!설마했던니가나를떠나버렸어",
+    "!돌아보지말고떠나가라",
+    "!고마해라마이묵었다",
+    "!고래의꿈101억",
+    "!너무반짝반짝눈이부셔",
+    "!춤추는작은까탈레나",
+    "!차돌박이고추짬봉",
+    "!우리가함께한날들",
+    "!13일의금요일",
+    "!인생은짧고예술은길다",
+    "!사랑은움직이는거야",
+    "!어느새부터힙합은안멋져",
+    "!내가비트사라햇제",
+    "!베이스드는사랑이다",
+    "!화성갈끄니까",
+    "!마포대교는무너졌냐",
+    "!무적캡틴싸우르스",
+    "!어떻게이별까지사랑하겠누",
+    "!존스미스의오른손은오늘도바쁘다",
+    "!나는심장이없어",
+    "!왈렛유튜브구독좋아요알림설정",
+    "!지금이순간마법처럼",
+    "!날아무리짜도우유안나와",
+]
+
+
+async def treasure_notice_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed = get_allowed_chat_id()
+    if allowed is None:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=int(allowed),
+            text=(
+                "잠시 후 오후 7시에 신규 보물 5개가 추가 될 예정입니다. "
+                "보물은 각각 300EXP를 지급합니다"
+            ),
+        )
+    except Exception:
+        return
+
+
+async def treasure_daily_add_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed = get_allowed_chat_id()
+    if allowed is None:
+        return
+    if not TREASURE_DAILY_POOL:
+        return
+
+    db = get_firebase_client()
+    dt = now_kst()
+
+    chat_id = int(allowed)
+    async with get_chat_lock(chat_id):
+        cref = chat_ref(db, chat_id)
+        csnap = cref.get()
+        cdata = csnap.to_dict() if csnap.exists else {}
+
+        extra = cdata.get("extra_treasure_map")
+        if not isinstance(extra, dict):
+            extra = {}
+
+        idx = int(cdata.get("treasure_daily_pool_index", 0))
+        pool_len = len(TREASURE_DAILY_POOL)
+        idx = idx % pool_len
+
+        picked: List[str] = []
+        for i in range(5):
+            picked.append(TREASURE_DAILY_POOL[(idx + i) % pool_len])
+
+        extra2 = dict(extra)
+        for cmd in picked:
+            if cmd in extra2:
+                continue
+            key = "daily_" + hashlib.md5(cmd.encode("utf-8")).hexdigest()[:12]
+            extra2[cmd] = key
+
+        cref.set(
+            {
+                "chat_id": chat_id,
+                "extra_treasure_map": extra2,
+                "treasure_daily_pool_index": (idx + 5) % pool_len,
+                "last_seen": dt,
+            },
+            merge=True,
+        )
+
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "오후 7시 신규 보물 5개가 추가되었습니다. "
+                "보물은 각각 300EXP를 지급합니다"
+            ),
+        )
+    except Exception:
+        return
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.callback_query is None:
         return
@@ -3879,6 +4019,8 @@ def main() -> None:
     application.job_queue.run_daily(send_leaderboard, time=time(14, 0, tzinfo=kst))
     application.job_queue.run_daily(send_leaderboard, time=time(18, 0, tzinfo=kst))
     application.job_queue.run_daily(send_leaderboard, time=time(22, 0, tzinfo=kst))
+    application.job_queue.run_daily(treasure_notice_job, time=time(18, 0, tzinfo=kst))
+    application.job_queue.run_daily(treasure_daily_add_job, time=time(19, 0, tzinfo=kst))
 
     application.job_queue.run_repeating(pals_hatch_job, interval=60, first=10)
     application.job_queue.run_repeating(pals_payout_job, interval=300, first=30)
