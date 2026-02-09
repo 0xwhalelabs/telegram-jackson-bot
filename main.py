@@ -114,6 +114,10 @@ def now_kst() -> datetime:
     return datetime.now(ZoneInfo(KST_TZ))
 
 
+def is_bot_shutdown(dt: datetime) -> bool:
+    return dt >= EVENT_SHUTDOWN_AT_KST
+
+
 def is_fever_time(dt: datetime) -> bool:
     start = dt.replace(hour=19, minute=0, second=0, microsecond=0)
     end = dt.replace(hour=23, minute=0, second=0, microsecond=0)
@@ -753,6 +757,70 @@ async def maybe_delete_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
 
+def _normalize_display_for_rank(display: str) -> str:
+    d = (display or "").strip()
+    if d.startswith("@"): 
+        d = d[1:]
+    return d.strip().lower()
+
+
+async def send_event_end_message(context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed = get_allowed_chat_id()
+    if allowed is None:
+        return
+
+    db = get_firebase_client()
+    dt = now_kst()
+    today = kst_date_str(dt)
+    chat_id = int(allowed)
+
+    cref = chat_ref(db, chat_id)
+    users = list(cref.collection("users").stream())
+    rows: List[Dict[str, Any]] = []
+    for udoc in users:
+        udata = udoc.to_dict() or {}
+        total_exp = int(udata.get("total_exp", 0))
+        level = int(udata.get("current_level", compute_level(total_exp)[0]))
+        display = str(udata.get("display") or udata.get("username") or udoc.id)
+        norm = _normalize_display_for_rank(display)
+        if norm in ("dongtani", "whale_labs"):
+            continue
+        rows.append({"display": display.lstrip("@").strip(), "level": level, "exp": total_exp})
+
+    rows.sort(key=lambda x: (x["level"], x["exp"]), reverse=True)
+    top25 = rows[:25]
+
+    rank_lines: List[str] = []
+    for i, r in enumerate(top25, start=1):
+        rank_lines.append(f"{i}. {r['display']} | Lv.{r['level']} | {r['exp']} EXP")
+
+    text = (
+        "축하합니다. 긴 여정을 함께한 여러분 모두 그리울 겁니다. 아래는 이번 이벤트의 TOP25위 입니다. "
+        "1등은 에어팟, 2,3,4등은 커피+치킨 5~21등은 커피를 받으실 예정입니다. 모두 축하드립니다.\n"
+        "순위에서 Dongtani님과 Whale_Labs는 제외됩니다.\n"
+        "[리더보드] (1~25위까지)\n"
+        + "\n".join(rank_lines)
+        + "\n"
+        "잭슨은 이제 영원한 데이터세계로 분해되어 떠납니다. 모든 데이터는 삭제됩니다.\n"
+        "모두 감사했습니다. 안녕..."
+    )
+
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=text)
+    except Exception:
+        return
+
+    async with get_chat_lock(chat_id):
+        cref.set(
+            {
+                "chat_id": chat_id,
+                "event_end_date": today,
+                "last_seen": dt,
+            },
+            merge=True,
+        )
+
+
 async def kick_user(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> None:
     try:
         await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
@@ -794,6 +862,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if update.message is None or update.message.text is None:
+        return
+
+    if is_bot_shutdown(now_kst()):
         return
 
     if update.effective_chat.type == ChatType.PRIVATE:
@@ -997,22 +1068,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         async with get_user_lock(chat_id, user_id):
             uref = user_ref(db, chat_id, user_id)
-            usnap = uref.get()
-            udata = usnap.to_dict() if usnap.exists else {}
-            hdate = udata.get("treasure_hint_date")
-            huses = int(udata.get("treasure_hint_uses_today", 0))
-            if hdate != today:
-                hdate = today
-                huses = 0
-            if huses >= 2:
-                await update.message.reply_text("!보물힌트는 하루에 2번만 사용할 수 있습니다.")
-                return
-
-            huses += 1
             uref.set(
                 {
-                    "treasure_hint_date": hdate,
-                    "treasure_hint_uses_today": huses,
                     "last_seen": dt,
                     "last_active_date": today,
                 },
@@ -1134,7 +1191,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "  (하루 2회, 이기면 방장 EXP에서 최대 50EXP 획득)\n"
             "\n"
             "[마피아의 밤]\n"
-            "- !검거username: 마피아 검거 (하루 5회, 성공 시 500EXP)\n"
+            "- !검거username: 마피아 검거 (성공 시 500EXP)\n"
             "  (마피아는 매일 00:00에 2명 선정, 11:00/15:00/20:00에 랜덤 유저 EXP를 강탈)\n"
             "\n"
             "[Based Pals]\n"
@@ -1274,20 +1331,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         async with get_user_lock(chat_id, catcher_id):
             csnap = catcher_ref.get()
-            cdata_u = csnap.to_dict() if csnap.exists else {}
-            uses_date = cdata_u.get("mafia_catch_uses_date")
-            uses_today = int(cdata_u.get("mafia_catch_uses_today", 0))
-            if uses_date != today:
-                uses_date = today
-                uses_today = 0
-            if uses_today >= 5:
-                await update.message.reply_text("검거는 하루 5번만 사용할 수 있습니다.")
-                return
-            uses_today += 1
+            _ = csnap.to_dict() if csnap.exists else {}
             catcher_ref.set(
                 {
-                    "mafia_catch_uses_date": uses_date,
-                    "mafia_catch_uses_today": uses_today,
                     "last_seen": dt,
                     "last_active_date": today,
                 },
@@ -2680,6 +2726,9 @@ async def pals_payout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 TREASURE_REWARD_EXP = 300
 
 
+EVENT_SHUTDOWN_AT_KST = datetime(2026, 2, 9, 23, 59, 0, tzinfo=now_kst().tzinfo)
+
+
 TREASURE_DAILY_POOL: List[str] = [
     "!어벤져스어셈블",
     "!나는자연인이다",
@@ -2824,6 +2873,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     q = update.callback_query
     data = (q.data or "").strip()
     await q.answer()
+
+    if is_bot_shutdown(now_kst()):
+        return
 
     if q.message is None or q.message.chat is None:
         return
@@ -4024,6 +4076,11 @@ def main() -> None:
 
     application.job_queue.run_repeating(pals_hatch_job, interval=60, first=10)
     application.job_queue.run_repeating(pals_payout_job, interval=300, first=30)
+
+    try:
+        application.job_queue.run_once(send_event_end_message, when=EVENT_SHUTDOWN_AT_KST)
+    except Exception:
+        pass
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
