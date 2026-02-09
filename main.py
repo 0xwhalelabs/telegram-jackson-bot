@@ -1020,6 +1020,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     "존스미노프",
                     "존스미스포츈",
                     "존스미스트롯",
+                    "존스미스미스미스",
                 ]
             )
         )
