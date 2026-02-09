@@ -114,10 +114,6 @@ def now_kst() -> datetime:
     return datetime.now(ZoneInfo(KST_TZ))
 
 
-def is_bot_shutdown(dt: datetime) -> bool:
-    return dt >= EVENT_SHUTDOWN_AT_KST
-
-
 def is_fever_time(dt: datetime) -> bool:
     start = dt.replace(hour=19, minute=0, second=0, microsecond=0)
     end = dt.replace(hour=23, minute=0, second=0, microsecond=0)
@@ -174,16 +170,7 @@ def compute_level(total_exp: int) -> Tuple[int, int, int]:
 
 
 def calculate_exp(message_text: str, dt: datetime) -> ExpResult:
-    if len(message_text) < 5:
-        return ExpResult(0, "short")
-
-    has_keyword = KEYWORD_PATTERN.search(message_text) is not None
-    base = 10 if has_keyword else 5
-
-    if is_fever_time(dt):
-        base = int(round(base * 1.5))
-
-    return ExpResult(base, "keyword" if has_keyword else "base")
+    return ExpResult(5, "fixed")
 
 
 def get_firebase_client() -> firestore.Client:
@@ -627,7 +614,6 @@ async def reset_user_by_username(
     udoc.reference.set(
         {
             "total_exp": 0,
-            "current_level": 1,
             "exp_events": [],
             "exp_gained_today": 0,
             "exp_gained_date": today,
@@ -671,7 +657,7 @@ async def handle_exp_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if is_anonymous_admin_message(update):
         await update.message.reply_text(
             "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
-            "익명 관리자 모드를 끄고 다시 `!EXP`를 입력해 주세요."
+            "익명 관리자 모드를 끄고 다시 `!지갑`을 입력해 주세요."
         )
         return
 
@@ -704,46 +690,9 @@ async def handle_exp_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
         total_exp = int(data.get("total_exp", 0))
-        level, progress, need = compute_level(total_exp)
-        remaining = need - progress
-
-        users = list(chat_ref(db, chat_id).collection("users").stream())
-        rows: List[Tuple[int, int, int]] = []
-        for d in users:
-            u = d.to_dict() or {}
-            tid = int(u.get("user_id", int(d.id)))
-            te = int(u.get("total_exp", 0))
-            tl = int(u.get("current_level", compute_level(te)[0]))
-            rows.append((tid, tl, te))
-        rows.sort(key=lambda x: (x[1], x[2]), reverse=True)
-        rank = 0
-        for i, (tid, _, _) in enumerate(rows, start=1):
-            if tid == user_id:
-                rank = i
-                break
-        total_users = len(rows)
-
-    result = {
-        "ok": True,
-        "level": level,
-        "total_exp": total_exp,
-        "remaining": remaining,
-        "need": need,
-        "progress": progress,
-        "date": date_key,
-    }
-
-    if not result.get("ok"):
-        await update.message.reply_text(result["msg"])
-        return
-
-    extra_rank = f"\n현재 순위: {rank}/{total_users}" if total_users > 0 else ""
     await update.message.reply_text(
         f"{display}\n"
-        f"현재 레벨: Lv.{result['level']}\n"
-        f"현재 EXP: {result['total_exp']}\n"
-        f"다음 레벨까지 남은 EXP: {result['remaining']}"
-        f"{extra_rank}"
+        f"현재 잔고: {total_exp}$WHAT"
     )
 
 
@@ -755,70 +704,6 @@ async def maybe_delete_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.delete()
     except Exception:
         return
-
-
-def _normalize_display_for_rank(display: str) -> str:
-    d = (display or "").strip()
-    if d.startswith("@"): 
-        d = d[1:]
-    return d.strip().lower()
-
-
-async def send_event_end_message(context: ContextTypes.DEFAULT_TYPE) -> None:
-    allowed = get_allowed_chat_id()
-    if allowed is None:
-        return
-
-    db = get_firebase_client()
-    dt = now_kst()
-    today = kst_date_str(dt)
-    chat_id = int(allowed)
-
-    cref = chat_ref(db, chat_id)
-    users = list(cref.collection("users").stream())
-    rows: List[Dict[str, Any]] = []
-    for udoc in users:
-        udata = udoc.to_dict() or {}
-        total_exp = int(udata.get("total_exp", 0))
-        level = int(udata.get("current_level", compute_level(total_exp)[0]))
-        display = str(udata.get("display") or udata.get("username") or udoc.id)
-        norm = _normalize_display_for_rank(display)
-        if norm in ("dongtani", "whale_labs"):
-            continue
-        rows.append({"display": display.lstrip("@").strip(), "level": level, "exp": total_exp})
-
-    rows.sort(key=lambda x: (x["level"], x["exp"]), reverse=True)
-    top25 = rows[:25]
-
-    rank_lines: List[str] = []
-    for i, r in enumerate(top25, start=1):
-        rank_lines.append(f"{i}. {r['display']} | Lv.{r['level']} | {r['exp']} EXP")
-
-    text = (
-        "축하합니다. 긴 여정을 함께한 여러분 모두 그리울 겁니다. 아래는 이번 이벤트의 TOP25위 입니다. "
-        "1등은 에어팟, 2,3,4등은 커피+치킨 5~21등은 커피를 받으실 예정입니다. 모두 축하드립니다.\n"
-        "순위에서 Dongtani님과 Whale_Labs는 제외됩니다.\n"
-        "[리더보드] (1~25위까지)\n"
-        + "\n".join(rank_lines)
-        + "\n"
-        "잭슨은 이제 영원한 데이터세계로 분해되어 떠납니다. 모든 데이터는 삭제됩니다.\n"
-        "모두 감사했습니다. 안녕..."
-    )
-
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=text)
-    except Exception:
-        return
-
-    async with get_chat_lock(chat_id):
-        cref.set(
-            {
-                "chat_id": chat_id,
-                "event_end_date": today,
-                "last_seen": dt,
-            },
-            merge=True,
-        )
 
 
 async def kick_user(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> None:
@@ -862,9 +747,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if update.message is None or update.message.text is None:
-        return
-
-    if is_bot_shutdown(now_kst()):
         return
 
     if update.effective_chat.type == ChatType.PRIVATE:
@@ -919,49 +801,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(f"보물 추가 완료: {added}개 (중복 스킵 {skipped}개)")
             return
 
-        if "마피아" in text and "오늘" in text:
-            if not is_owner(update):
-                await update.message.reply_text("권한이 없습니다.")
-                return
-            allowed = get_allowed_chat_id()
-            if allowed is None:
-                await update.message.reply_text("설정된 채팅이 없습니다.")
-                return
-            db = get_firebase_client()
-            dt = now_kst()
-            today = kst_date_str(dt)
-            cref = chat_ref(db, int(allowed))
-            csnap = cref.get()
-            cdata = csnap.to_dict() if csnap.exists else {}
-            mafia_date = cdata.get("mafia_date")
-            if mafia_date != today:
-                await update.message.reply_text("오늘의 마피아 데이터가 없습니다.")
-                return
-            mafia_ids = cdata.get("mafia_all_ids")
-            if not isinstance(mafia_ids, list) or not mafia_ids:
-                mafia_ids = cdata.get("mafia_alive_ids")
-            if not isinstance(mafia_ids, list):
-                mafia_ids = []
-            mafia_ids = [int(x) for x in mafia_ids if isinstance(x, int)]
-            if not mafia_ids:
-                await update.message.reply_text("오늘의 마피아 데이터가 없습니다.")
-                return
-
-            users = list(cref.collection("users").stream())
-            id_to_name: Dict[int, str] = {}
-            for udoc in users:
-                udata = udoc.to_dict() or {}
-                uid = int(udata.get("user_id", int(udoc.id)))
-                uname = udata.get("username")
-                if isinstance(uname, str) and uname.strip():
-                    id_to_name[uid] = uname.strip()
-                    continue
-                disp = udata.get("display")
-                if isinstance(disp, str) and disp.strip():
-                    id_to_name[uid] = disp.strip().lstrip("@").strip()
-
-            names = [id_to_name.get(mid, str(mid)) for mid in mafia_ids]
-            await update.message.reply_text(f"오늘의 마피아: {', '.join(names)}")
         return
 
     if update.effective_chat.type not in (ChatType.SUPERGROUP, ChatType.GROUP):
@@ -972,6 +811,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     text = update.message.text
     chat_id = int(update.effective_chat.id)
+
+    if text.strip() in ("!알구매", "!먹이", "!마이팔"):
+        await update.message.reply_text("해당 기능은 삭제되었습니다.")
+        return
 
     treasure_map: Dict[str, str] = {
         "!섹스": "sex",
@@ -1142,11 +985,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             usnap = uref.get()
             udata = usnap.to_dict() if usnap.exists else {}
             total_exp = int(udata.get("total_exp", 0)) + TREASURE_REWARD_EXP
-            level = compute_level(total_exp)[0]
             uref.set(
                 {
                     "total_exp": total_exp,
-                    "current_level": level,
                     "last_seen": dt,
                     "last_active_date": today,
                 },
@@ -1156,13 +997,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("숨은 보물찾기에 성공하였습니다.")
         return
 
-    if text.strip() == "!잭슨":
+    if text.strip() == "!존스미스":
         await update.message.reply_text(
             random.choice(
                 [
                     "그만불러",
                     "부르지마",
                     "아임낫유얼파더",
+                    "존스캠스",
+                    "존스미싱",
+                    "존스와핑",
+                    "존스팽킹",
+                    "존스미시",
+                    "존스트레스",
+                    "존스미마셍",
+                    "존스트라이크",
+                    "존스머프",
+                    "존이스피싱",
+                    "존스웨디시",
+                    "존스크럽",
+                    "존스근허다",
+                    "존스미노프",
+                    "존스미스포츈",
+                    "존스미스트롯",
                 ]
             )
         )
@@ -1174,13 +1031,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if text.strip() == "!가이드":
         await update.message.reply_text(
-            "Whalet BOT 명령어 가이드\n"
+            "존스미스 BOT 명령어 가이드\n"
             "\n"
-            "[EXP/레벨]\n"
-            "- !exp / .exp: 내 EXP/레벨/순위 확인\n"
+            "[지갑]\n"
+            "- !지갑: 내 잔고 확인\n"
             "\n"
             "[출석]\n"
-            "- !출첵: 하루 1회 100EXP (출첵 완료 메시지)\n"
+            "- !출첵: 하루 1회 100$WHAT\n"
             "\n"
             "[메뉴 추천]\n"
             "- !점메추: 점심 메뉴 랜덤 추천\n"
@@ -1188,198 +1045,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "\n"
             "[덤벼고래 (가위바위보)]\n"
             "- !덤벼고래: 방장에게만 도전 가능한 가위바위보\n"
-            "  (하루 2회, 이기면 방장 EXP에서 최대 50EXP 획득)\n"
+            "  (하루 2회, 이기면 방장 $WHAT에서 최대 50$WHAT 획득)\n"
             "\n"
-            "[마피아의 밤]\n"
-            "- !검거username: 마피아 검거 (성공 시 500EXP)\n"
-            "  (마피아는 매일 00:00에 2명 선정, 11:00/15:00/20:00에 랜덤 유저 EXP를 강탈)\n"
-            "\n"
-            "[Based Pals]\n"
-            "- !알구매: 100EXP로 알 구매 (1시간 후 부화)\n"
-            "- !먹이: 버튼으로 50/100/500EXP를 소모해 성장치 상승\n"
-            "- !마이팔: 내 Pals/알 상태 확인\n"
+            "[보물]\n"
+            "- !남은보물: 남은 보물 개수 확인\n"
+            "- !보물힌트: 남은 보물 중 랜덤 힌트\n"
             "\n"
             "[검 키우기]\n"
             "- !인벤토리: 현재 검/방어티켓 확인\n"
             "- !강화확률: 강화 단계별 비용/확률/판매가 확인\n"
             "- !오른: 강화 진행(확정 버튼)\n"
             "- !당근마켓: 현재 검 판매(확정 버튼)\n"
-            f"- !베이스드몰: 검 구매({BASED_MALL_PRICE_EXP}EXP, 검이 없을 때만 가능)\n"
+            f"- !베이스드몰: 검 구매({BASED_MALL_PRICE_EXP}$WHAT, 검이 없을 때만 가능)\n"
+            "- !강화비용: 강화 비용/판매가\n"
             "\n"
             "[기타]\n"
             "- !whoami: 내 USER_ID/USERNAME 확인\n"
-        )
-        return
-
-    if text.strip() == "!마피아현황":
-        chat_id = int(update.effective_chat.id)
-        dt = now_kst()
-        today = kst_date_str(dt)
-        db = get_firebase_client()
-        cref = chat_ref(db, chat_id)
-        async with get_chat_lock(chat_id):
-            csnap = cref.get()
-            cdata = csnap.to_dict() if csnap.exists else {}
-            mafia_cleared_date = cdata.get("mafia_cleared_date")
-            mafia_date = cdata.get("mafia_date")
-            alive_ids = cdata.get("mafia_alive_ids")
-            if not isinstance(alive_ids, list):
-                alive_ids = []
-            alive_ids = [int(x) for x in alive_ids if isinstance(x, int)]
-            if mafia_cleared_date != today and (mafia_date != today or not alive_ids):
-                users = list(cref.collection("users").stream())
-                mafia_ids = _select_mafia_ids(users, dt)
-                alive_ids = mafia_ids
-                cref.set(
-                    {
-                        "mafia_date": today,
-                        "mafia_alive_ids": mafia_ids,
-                        "mafia_cleared_date": None,
-                        "last_seen": dt,
-                    },
-                    merge=True,
-                )
-        await update.message.reply_text(
-            f"현재 남은 마피아는 ({len(alive_ids)}/{MAFIA_PER_CHAT})명입니다."
-        )
-        return
-
-    if text.strip().startswith("!검거"):
-        if update.effective_chat is None or update.effective_user is None:
-            return
-        if is_anonymous_admin_message(update):
-            await update.message.reply_text(
-                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
-                "익명 관리자 모드를 끄고 다시 입력해 주세요."
-            )
-            return
-
-        raw = text.strip()
-        target_name = ""
-        target_name = raw[len("!검거"):].strip()
-        if target_name.startswith("@"): 
-            target_name = target_name[1:].strip()
-
-        if not target_name:
-            await update.message.reply_text("사용법: !검거username")
-            return
-
-        chat_id = int(update.effective_chat.id)
-        catcher_id = int(update.effective_user.id)
-        dt = now_kst()
-        today = kst_date_str(dt)
-
-        db = get_firebase_client()
-        cref = chat_ref(db, chat_id)
-        catcher_ref = user_ref(db, chat_id, catcher_id)
-
-        async with get_chat_lock(chat_id):
-            csnap = cref.get()
-            cdata = csnap.to_dict() if csnap.exists else {}
-            mafia_cleared_date = cdata.get("mafia_cleared_date")
-            mafia_date = cdata.get("mafia_date")
-            alive_ids = cdata.get("mafia_alive_ids")
-            if not isinstance(alive_ids, list):
-                alive_ids = []
-            alive_ids = [int(x) for x in alive_ids if isinstance(x, int)]
-
-            if mafia_cleared_date == today:
-                await update.message.reply_text("오늘의 마피아는 모두 검거되었습니다.")
-                return
-
-            if mafia_date != today:
-                users = list(cref.collection("users").stream())
-                candidates: List[int] = []
-                for udoc in users:
-                    udata = udoc.to_dict() or {}
-                    uid = int(udata.get("user_id", int(udoc.id)))
-                    if _is_recent_active(udata, dt):
-                        candidates.append(uid)
-                if len(candidates) < MAFIA_PER_CHAT:
-                    candidates = []
-                    for udoc in users:
-                        udata = udoc.to_dict() or {}
-                        uid = int(udata.get("user_id", int(udoc.id)))
-                        candidates.append(uid)
-                if len(set(candidates)) >= MAFIA_PER_CHAT:
-                    alive_ids = random.sample(list(set(candidates)), MAFIA_PER_CHAT)
-                else:
-                    alive_ids = list(set(candidates))
-                cref.set(
-                    {
-                        "mafia_date": today,
-                        "mafia_alive_ids": alive_ids,
-                        "mafia_all_ids": alive_ids,
-                        "mafia_cleared_date": None,
-                        "last_seen": dt,
-                    },
-                    merge=True,
-                )
-
-        users = list(cref.collection("users").stream())
-        target_id = None
-        for udoc in users:
-            udata = udoc.to_dict() or {}
-            uname = udata.get("username")
-            if isinstance(uname, str) and uname.lower() == target_name.lower():
-                target_id = int(udata.get("user_id", int(udoc.id)))
-                break
-
-        if target_id is None:
-            await update.message.reply_text("대상 유저를 찾을 수 없습니다.")
-            return
-
-        async with get_user_lock(chat_id, catcher_id):
-            csnap = catcher_ref.get()
-            _ = csnap.to_dict() if csnap.exists else {}
-            catcher_ref.set(
-                {
-                    "last_seen": dt,
-                    "last_active_date": today,
-                },
-                merge=True,
-            )
-
-        async with get_chat_lock(chat_id):
-            csnap2 = cref.get()
-            cdata2 = csnap2.to_dict() if csnap2.exists else {}
-            alive_ids2 = cdata2.get("mafia_alive_ids")
-            if not isinstance(alive_ids2, list):
-                alive_ids2 = []
-            alive_ids2 = [int(x) for x in alive_ids2 if isinstance(x, int)]
-
-            if int(target_id) not in alive_ids2:
-                await update.message.reply_text("검거 실패!")
-                return
-
-            alive_ids3 = [x for x in alive_ids2 if int(x) != int(target_id)]
-            cref.set(
-                {
-                    "mafia_alive_ids": alive_ids3,
-                    "mafia_date": today,
-                    "mafia_cleared_date": today if len(alive_ids3) == 0 else None,
-                    "last_seen": dt,
-                },
-                merge=True,
-            )
-
-        async with get_user_lock(chat_id, catcher_id):
-            csnap3 = catcher_ref.get()
-            cdata3 = csnap3.to_dict() if csnap3.exists else {}
-            total_exp = int(cdata3.get("total_exp", 0)) + int(MAFIA_CATCH_REWARD_EXP)
-            catcher_ref.set(
-                {
-                    "total_exp": total_exp,
-                    "current_level": compute_level(total_exp)[0],
-                    "last_seen": dt,
-                    "last_active_date": today,
-                },
-                merge=True,
-            )
-
-        alive_cnt = len(alive_ids3)
-        await update.message.reply_text(
-            f"검거 성공! {MAFIA_CATCH_REWARD_EXP}EXP를 획득했습니다. 현재 생존마피아 ({alive_cnt}/{MAFIA_PER_CHAT})"
         )
         return
 
@@ -1646,7 +1327,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         await update.message.reply_text(
             "검을 구매하시겠습니까? IMF, FTX, 루나, 박상기의 난을 겪은 주인장은 검 당근마켓 판매가격의 20배인 "
-            f"{BASED_MALL_PRICE_EXP}EXP에 검을 팔고있습니다.",
+            f"{BASED_MALL_PRICE_EXP}$WHAT에 검을 팔고있습니다.",
             reply_markup=kb,
         )
         return
@@ -1718,9 +1399,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             name = str(row.get("name") or "")
             cost = int(row.get("cost") or 0)
             sell = row.get("sell")
-            sell_txt = "판매 불가" if sell is None else f"{int(sell)}EXP"
+            sell_txt = "판매 불가" if sell is None else f"{int(sell)}$WHAT"
             lines.append(f"{lvl}강 {name}")
-            lines.append(f"- 강화비용: {cost}EXP")
+            lines.append(f"- 강화비용: {cost}$WHAT")
             lines.append(f"- 판매가: {sell_txt}")
             lines.append("")
         if lines and lines[-1] == "":
@@ -1769,7 +1450,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 ]
             )
             await update.message.reply_text(
-                f"{display}님 현재 소유한 [{sword_name(lvl)}]을 파시겠습니까? 판매가격 {int(price)}EXP",
+                f"{display}님 현재 소유한 [{sword_name(lvl)}]을 파시겠습니까? 판매가격 {int(price)}$WHAT",
                 reply_markup=kb,
             )
         return
@@ -1834,7 +1515,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             await update.message.reply_text(
                 f"{display}님의 [{sword_name(lvl)}]을 강화 하시겠습니까?\n"
-                f"강화확률 {rate*100:.2f}%, 강화비용 {int(cost)}exp\n"
+                f"강화확률 {rate*100:.2f}%, 강화비용 {int(cost)}$WHAT\n"
                 f"강화 후 검[{nxt_name}] 당근마켓 시세 {sell_txt}\n"
                 f"보유 방어티켓: {tickets}장" + extra_txt,
                 reply_markup=kb,
@@ -1868,7 +1549,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             prev_total = int(udata.get("total_exp", 0))
             new_total = prev_total + 100
-            new_level = compute_level(new_total)[0]
 
             uref.set(
                 {
@@ -1876,7 +1556,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     "username": username or None,
                     "display": display,
                     "total_exp": new_total,
-                    "current_level": new_level,
                     "checkin_date": today,
                     "last_seen": dt,
                     "last_active_date": today,
@@ -2089,7 +1768,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
 
-    if text.strip() == "!상납금":
+    if text.strip() == "!비자금":
         if not is_owner(update):
             await update.message.reply_text("권한이 없습니다.")
             return
@@ -2110,7 +1789,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             tribute["step"] = "await_amount"
             tribute["target_user_id"] = target_user_id
             context.chat_data["tribute_mode"] = tribute
-            await update.message.reply_text("얼마의 상납금을 바치시겠습니까?")
+            await update.message.reply_text("얼마의 비자금을 바치시겠습니까?")
             return
 
         if step == "await_amount":
@@ -2118,17 +1797,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             try:
                 amount = int(t)
             except ValueError:
-                await update.message.reply_text("상납금은 숫자로 입력해주세요.")
+                await update.message.reply_text("비자금은 숫자로 입력해주세요.")
                 return
             if amount <= 0:
-                await update.message.reply_text("상납금은 1 이상의 숫자로 입력해주세요.")
+                await update.message.reply_text("비자금은 1 이상의 숫자로 입력해주세요.")
                 return
 
             chat_id = int(update.effective_chat.id)
             target_user_id = int(tribute.get("target_user_id") or 0)
             if target_user_id <= 0:
                 context.chat_data.pop("tribute_mode", None)
-                await update.message.reply_text("대상 유저 정보가 유효하지 않습니다. 다시 `!상납금`부터 진행해주세요.")
+                await update.message.reply_text("대상 유저 정보가 유효하지 않습니다. 다시 `!비자금`부터 진행해주세요.")
                 return
 
             db = get_firebase_client()
@@ -2140,7 +1819,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                 prev_total = int(udata.get("total_exp", 0))
                 new_total = prev_total + int(amount)
-                new_level = compute_level(new_total)[0]
 
                 target_username = udata.get("username")
                 target_display = udata.get("display")
@@ -2153,7 +1831,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         "username": target_username or None,
                         "display": target_display,
                         "total_exp": new_total,
-                        "current_level": new_level,
                         "last_seen": dt,
                     },
                     merge=True,
@@ -2162,42 +1839,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context.chat_data.pop("tribute_mode", None)
             owner_name = update.effective_user.full_name if update.effective_user else "방장"
             await update.effective_chat.send_message(
-                f"{owner_name}님이 비열하게도 {target_display}님에게 {amount}EXP를 싸바싸바했습니다."
+                f"{owner_name}님이 비열하게도 {target_display}님에게 {amount}$WHAT를 싸바싸바했습니다."
             )
             return
 
-    if text.strip() == "!타노스":
+    if text.strip() == "!꿀꺽":
         if not is_owner(update):
             await update.message.reply_text("권한이 없습니다.")
             return
         context.chat_data["thanos_mode"] = True
-        await update.message.reply_text("타노스할 유저를 선택해주세요.")
+        await update.message.reply_text("꿀꺽할 유저를 선택해주세요.")
         return
 
     if is_owner(update) and context.chat_data.get("thanos_mode"):
         t = text.strip()
         if t.startswith("!") and len(t) > 1 and " " not in t and t not in (
-            "!exp",
-            ".exp",
+            "!지갑",
             "!reset_db",
             "!reset_db confirm",
             "!chat_id",
             "!whoami",
-            "!리더보드",
-            "!leaderboard",
-            "!타노스",
+            "!꿀꺽",
         ):
             target_username = t[1:]
             context.chat_data["thanos_mode"] = False
             await reset_user_by_username(update, context, target_username)
             return
-
-    if text.strip() in ("!리더보드", "!leaderboard"):
-        if not is_owner(update):
-            await update.message.reply_text("권한이 없습니다.")
-            return
-        await send_leaderboard(context)
-        return
 
     if text.strip().lower() == "!chat_id":
         await update.message.reply_text(f"CHAT_ID: {int(update.effective_chat.id)}")
@@ -2214,14 +1881,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if is_anonymous_admin_message(update):
-        if text.strip().lower() in ("!exp", ".exp"):
+        if text.strip().lower() in ("!지갑",):
             await update.message.reply_text(
                 "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
-                "익명 관리자 모드를 끄고 다시 `!EXP`를 입력해 주세요."
+                "익명 관리자 모드를 끄고 다시 `!지갑`을 입력해 주세요."
             )
         return
 
-    if text.strip().lower() in ("!exp", ".exp"):
+    if text.strip().lower() in ("!지갑",):
         await handle_exp_query(update, context)
         return
 
@@ -2277,11 +1944,15 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
         if counter >= 365:
             counter = 0
             bonus_exp += 100
-            bonus_msg.append(f"띠링! 왈렛의 축복이 찾아왔습니다. {display}님이 100EXP를 획득하였습니다.")
+            bonus_msg.append(
+                "띠링! 존 스미스의 폐지줍기 발!!동!! 존스미스가 고사리손으로 폐지를 주워 어렵사리 마련한 돈을 성공적으로 빼앗았습니다. 100$WHAT 획득"
+            )
         if edison_counter >= 777:
             edison_counter = 0
             bonus_exp += 500
-            bonus_msg.append(f"777번째엔 에디슨의 지혜가 내려옵니다. {display}님이 500EXP를 획득")
+            bonus_msg.append(
+                f"존 스미스가 저점매집한 코인을 개미들에게 팔아 넘겼습니다. 바람잡이를 한 당신({display})에게 500$WHAT를 선사합니다."
+            )
         if defense_counter >= int(defense_target):
             defense_counter = 0
             defense_target = random.randint(400, 600)
@@ -2361,58 +2032,15 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
     if bonus_exp > 0:
         total0 = int(udata.get("total_exp", 0))
         total1 = total0 + int(bonus_exp)
-        level1 = compute_level(total1)[0]
-        uref.set({"total_exp": total1, "current_level": level1}, merge=True)
+        uref.set({"total_exp": total1}, merge=True)
         udata["total_exp"] = total1
-        udata["current_level"] = level1
         for m in bonus_msg:
             try:
                 await update.effective_chat.send_message(m)
             except Exception:
                 pass
 
-    winners = context.chat_data.pop("easter_bisd_winners", None)
-    if isinstance(winners, list) and winners:
-        sender_id = int(user_id)
-        for wid in winners:
-            wid_i = int(wid)
-            if wid_i == sender_id:
-                total0 = int(udata.get("total_exp", 0))
-                total1 = total0 + int(EASTER_BISD_REWARD_EXP)
-                uref.set(
-                    {
-                        "total_exp": total1,
-                        "current_level": compute_level(total1)[0],
-                        "last_seen": dt,
-                        "last_active_date": today,
-                    },
-                    merge=True,
-                )
-                udata["total_exp"] = total1
-                udata["current_level"] = compute_level(total1)[0]
-                continue
-
-            async with get_user_lock(chat_id, wid_i):
-                wref = user_ref(db, chat_id, wid_i)
-                wsnap = wref.get()
-                wdata = wsnap.to_dict() if wsnap.exists else {}
-                total0 = int(wdata.get("total_exp", 0))
-                total1 = total0 + int(EASTER_BISD_REWARD_EXP)
-                wref.set(
-                    {
-                        "total_exp": total1,
-                        "current_level": compute_level(total1)[0],
-                        "last_seen": dt,
-                        "last_active_date": today,
-                    },
-                    merge=True,
-                )
-        try:
-            await update.effective_chat.send_message(
-                "띠링, 1회성 이스터에그 발견. 굉장한 모험가들이 숨겨진 이스터에그를 발견하였습니다. 해당 모험가들에게 2000EXP를 지급합니다."
-            )
-        except Exception:
-            pass
+    context.chat_data.pop("easter_bisd_winners", None)
 
     cur_text = (text or "").strip()
 
@@ -2497,7 +2125,6 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
 
     gained = 0
     total_exp = int(udata.get("total_exp", 0))
-    prev_level = int(udata.get("current_level", compute_level(total_exp)[0]))
 
     if can_count:
         exp_res = calculate_exp(text, dt)
@@ -2505,28 +2132,6 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
         if gained > 0:
             exp_events.append({"ts": dt, "exp": gained})
             total_exp += gained
-
-    pal = udata.get("pal")
-    if isinstance(pal, dict):
-        stage = str(pal.get("stage") or "baby")
-        type_id = int(pal.get("type_id") or 1)
-        growth = int(pal.get("growth") or 0)
-        growth += 5
-
-        next_stage = stage
-        if stage == "baby" and growth >= PALS_EVOLVE_AT["baby"]:
-            next_stage = "teen"
-        elif stage == "teen" and growth >= PALS_EVOLVE_AT["teen"]:
-            next_stage = "adult"
-        elif stage == "adult" and growth >= PALS_EVOLVE_AT["adult"]:
-            next_stage = "ultimate"
-
-        pal2 = dict(pal)
-        pal2["growth"] = growth
-        pal2["stage"] = next_stage
-        udata["pal"] = pal2
-
-    new_level, progress, need = compute_level(total_exp)
 
     exp_gained_date = udata.get("exp_gained_date")
     exp_gained_today = int(udata.get("exp_gained_today", 0))
@@ -2542,7 +2147,6 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
             "username": username or None,
             "display": display,
             "total_exp": total_exp,
-            "current_level": new_level,
             "exp_events": exp_events,
             "warn_count": warn_count,
             "warn_reset_at": warn_reset_at,
@@ -2550,7 +2154,6 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
             "last_active_date": today,
             "exp_gained_date": exp_gained_date,
             "exp_gained_today": exp_gained_today,
-            "pal": udata.get("pal") if isinstance(udata.get("pal"), dict) else firestore.DELETE_FIELD,
         },
         merge=True,
     )
@@ -2564,169 +2167,10 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
         merge=True,
     )
 
-    if new_level != prev_level:
-        await update.effective_chat.send_message(
-            f"🎉 {display}님 레벨 업!\n현재 레벨 Lv.{new_level}"
-        )
-
-    pal_final = udata.get("pal")
-    if isinstance(pal_final, dict):
-        stage0 = str(pal.get("stage") or "baby") if isinstance(pal, dict) else "baby"
-        stage1 = str(pal_final.get("stage") or "baby")
-        if stage1 != stage0:
-            img = pals_stage_image_url(stage1, int(pal_final.get("type_id") or 1))
-            caption = (
-                "✨ 진화 알림\n\n"
-                f"{display} 님의 [{pals_display_title(stage0, int(pal_final.get('type_id') or 1))}]가\n"
-                f"[{pals_display_title(stage1, int(pal_final.get('type_id') or 1))}]로 진화했습니다!"
-            )
-            if img:
-                try:
-                    await update.effective_chat.send_photo(photo=img, caption=caption)
-                except Exception:
-                    b = await download_url_bytes(img)
-                    if b:
-                        try:
-                            await update.effective_chat.send_photo(
-                                photo=InputFile(io.BytesIO(b), filename="pal.png"),
-                                caption=caption,
-                            )
-                        except Exception:
-                            await update.effective_chat.send_message(caption)
-                    else:
-                        await update.effective_chat.send_message(caption)
-            else:
-                await update.effective_chat.send_message(caption)
-
-
-async def pals_hatch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    allowed = get_allowed_chat_id()
-    if allowed is None:
-        return
-
-    chat_id = int(allowed)
-    db = get_firebase_client()
-    dt = now_kst()
-    today = kst_date_str(dt)
-
-    users = list(chat_ref(db, chat_id).collection("users").stream())
-    for udoc in users:
-        udata = udoc.to_dict() or {}
-        egg = udata.get("egg")
-        if not isinstance(egg, dict) or not egg.get("hatch_at"):
-            continue
-        hatch_at = egg.get("hatch_at")
-        if hatch_at > dt:
-            continue
-        if udata.get("pal"):
-            udoc.reference.set({"egg": firestore.DELETE_FIELD}, merge=True)
-            continue
-
-        type_id = random.randint(1, 5)
-        pal = {
-            "stage": "baby",
-            "type_id": type_id,
-            "growth": 0,
-            "hatched_at": dt,
-            "last_payout_at": dt,
-        }
-
-        display = udata.get("display") or (f"@{udata.get('username')}" if udata.get("username") else str(udoc.id))
-
-        udoc.reference.set(
-            {
-                "egg": firestore.DELETE_FIELD,
-                "pal": pal,
-                "last_seen": dt,
-                "last_active_date": today,
-            },
-            merge=True,
-        )
-
-        msg = (
-            "🐣 부화 알림\n\n"
-            f"{display} 님의 알이 부화했습니다!\n"
-            f"[{pals_display_title('baby', type_id)}]가 태어났습니다!"
-        )
-        img = pals_stage_image_url("baby", type_id)
-        if img:
-            try:
-                await context.bot.send_photo(chat_id=chat_id, photo=img, caption=msg)
-            except Exception:
-                b = await download_url_bytes(img)
-                if b:
-                    try:
-                        await context.bot.send_photo(
-                            chat_id=chat_id,
-                            photo=InputFile(io.BytesIO(b), filename="pal.png"),
-                            caption=msg,
-                        )
-                    except Exception:
-                        await context.bot.send_message(chat_id=chat_id, text=msg)
-                else:
-                    await context.bot.send_message(chat_id=chat_id, text=msg)
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=msg)
-
-
-async def pals_payout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    allowed = get_allowed_chat_id()
-    if allowed is None:
-        return
-
-    chat_id = int(allowed)
-    db = get_firebase_client()
-    dt = now_kst()
-    today = kst_date_str(dt)
-
-    users = list(chat_ref(db, chat_id).collection("users").stream())
-    for udoc in users:
-        udata = udoc.to_dict() or {}
-        pal = udata.get("pal")
-        if not isinstance(pal, dict):
-            continue
-        stage = str(pal.get("stage") or "baby")
-        payout = int(PALS_PAYOUT_EXP.get(stage, 0))
-        if payout <= 0:
-            continue
-        last_payout_at = pal.get("last_payout_at")
-        if last_payout_at and last_payout_at > dt - timedelta(hours=24):
-            continue
-
-        total_exp = int(udata.get("total_exp", 0)) + payout
-        level = compute_level(total_exp)[0]
-
-        pal2 = dict(pal)
-        pal2["last_payout_at"] = dt
-
-        udoc.reference.set(
-            {
-                "total_exp": total_exp,
-                "current_level": level,
-                "pal": pal2,
-                "last_seen": dt,
-                "last_active_date": today,
-            },
-            merge=True,
-        )
-
-        display = udata.get("display") or (f"@{udata.get('username')}" if udata.get("username") else str(udoc.id))
-        msg = (
-            "💰 Pals 수익 알림\n\n"
-            f"{display} 님\n"
-            f"[{pals_display_title(stage, int(pal.get('type_id') or 1))}]가\n"
-            f"오늘의 EXP {payout}을 벌어왔습니다!"
-        )
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=msg)
-        except Exception:
-            continue
+    return
 
 
 TREASURE_REWARD_EXP = 300
-
-
-EVENT_SHUTDOWN_AT_KST = datetime(2026, 2, 9, 23, 59, 0, tzinfo=now_kst().tzinfo)
 
 
 TREASURE_DAILY_POOL: List[str] = [
@@ -2802,7 +2246,7 @@ async def treasure_notice_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id=int(allowed),
             text=(
                 "잠시 후 오후 7시에 신규 보물 5개가 추가 될 예정입니다. "
-                "보물은 각각 300EXP를 지급합니다"
+                "보물은 각각 300$WHAT를 지급합니다"
             ),
         )
     except Exception:
@@ -2859,7 +2303,7 @@ async def treasure_daily_add_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id=chat_id,
             text=(
                 "오후 7시 신규 보물 5개가 추가되었습니다. "
-                "보물은 각각 300EXP를 지급합니다"
+                "보물은 각각 300$WHAT를 지급합니다"
             ),
         )
     except Exception:
@@ -2874,7 +2318,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = (q.data or "").strip()
     await q.answer()
 
-    if is_bot_shutdown(now_kst()):
+    if data.startswith("pals_"):
         return
 
     if q.message is None or q.message.chat is None:
@@ -2883,178 +2327,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = int(q.message.chat.id)
     allowed = get_allowed_chat_id()
     if allowed is not None and int(allowed) != chat_id:
-        return
-
-    if data.startswith("pals_feed_end:"):
-        parts = data.split(":")
-        if len(parts) != 3:
-            return
-        _, cid, uid = parts
-        if int(cid) != chat_id:
-            return
-        if q.from_user is None or int(q.from_user.id) != int(uid):
-            try:
-                await q.answer("명령어를 친 본인만 누를 수 있습니다.", show_alert=True)
-            except Exception:
-                return
-            return
-        try:
-            await q.message.edit_text("먹이주기를 종료했습니다.")
-        except Exception:
-            return
-        return
-
-    if data.startswith("pals_feed:"):
-        parts = data.split(":")
-        if len(parts) != 4:
-            return
-        _, cid, uid, amount_s = parts
-        if int(cid) != chat_id:
-            return
-        if q.from_user is None or int(q.from_user.id) != int(uid):
-            try:
-                await q.answer("명령어를 친 본인만 누를 수 있습니다.", show_alert=True)
-            except Exception:
-                return
-            return
-        try:
-            amount = int(amount_s)
-        except Exception:
-            return
-        if amount not in (50, 100, 500):
-            return
-
-        db = get_firebase_client()
-        dt = now_kst()
-        today = kst_date_str(dt)
-        target_user_id = int(uid)
-
-        async with get_user_lock(chat_id, target_user_id):
-            uref = user_ref(db, chat_id, target_user_id)
-            snap = uref.get()
-            udata = snap.to_dict() if snap.exists else {}
-            pal = udata.get("pal")
-            if not isinstance(pal, dict):
-                try:
-                    await q.answer("현재 Pals가 없습니다.", show_alert=True)
-                except Exception:
-                    return
-                return
-
-            total_exp = int(udata.get("total_exp", 0))
-            if total_exp < amount:
-                try:
-                    await q.answer(f"EXP가 부족합니다. (필요 {amount}EXP)", show_alert=True)
-                except Exception:
-                    return
-                return
-
-            stage0 = str(pal.get("stage") or "baby")
-            type_id = int(pal.get("type_id") or 1)
-            growth = int(pal.get("growth") or 0)
-
-            growth += amount
-            total_exp -= amount
-
-            stage1 = stage0
-            if stage1 == "baby" and growth >= int(PALS_EVOLVE_AT.get("baby", 0)):
-                stage1 = "teen"
-            if stage1 == "teen" and growth >= int(PALS_EVOLVE_AT.get("teen", 0)):
-                stage1 = "adult"
-            if stage1 == "adult" and growth >= int(PALS_EVOLVE_AT.get("adult", 0)):
-                stage1 = "ultimate"
-
-            pal2 = dict(pal)
-            pal2["growth"] = growth
-            pal2["stage"] = stage1
-            level = compute_level(total_exp)[0]
-
-            uref.set(
-                {
-                    "total_exp": total_exp,
-                    "current_level": level,
-                    "pal": pal2,
-                    "last_seen": dt,
-                    "last_active_date": today,
-                },
-                merge=True,
-            )
-
-            display = udata.get("display")
-            if not display:
-                username = (q.from_user.username if q.from_user else None)
-                display = f"@{username}" if username else str(target_user_id)
-
-        kb = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        text="50EXP",
-                        callback_data=f"pals_feed:{chat_id}:{target_user_id}:50",
-                    ),
-                    InlineKeyboardButton(
-                        text="100EXP",
-                        callback_data=f"pals_feed:{chat_id}:{target_user_id}:100",
-                    ),
-                    InlineKeyboardButton(
-                        text="500EXP",
-                        callback_data=f"pals_feed:{chat_id}:{target_user_id}:500",
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="먹이주기 종료",
-                        callback_data=f"pals_feed_end:{chat_id}:{target_user_id}",
-                    )
-                ],
-            ]
-        )
-
-        try:
-            await q.message.edit_text(
-                f"{display} 님\n"
-                f"-{amount}EXP / 성장치 +{amount}\n"
-                f"현재 성장치: {growth}\n"
-                f"현재 단계: {PALS_STAGE_LABEL.get(stage1, stage1)}",
-                reply_markup=kb,
-            )
-        except Exception:
-            pass
-
-        if stage1 != stage0:
-            img = pals_stage_image_url(stage1, type_id)
-            caption = (
-                "✨ 진화 알림\n\n"
-                f"{display} 님의 [{pals_display_title(stage0, type_id)}]가\n"
-                f"[{pals_display_title(stage1, type_id)}]로 진화했습니다!"
-            )
-            if img:
-                try:
-                    await context.bot.send_photo(chat_id=chat_id, photo=img, caption=caption)
-                except Exception:
-                    b = await download_url_bytes(img)
-                    if b:
-                        try:
-                            await context.bot.send_photo(
-                                chat_id=chat_id,
-                                photo=InputFile(io.BytesIO(b), filename="pal.png"),
-                                caption=caption,
-                            )
-                        except Exception:
-                            try:
-                                await context.bot.send_message(chat_id=chat_id, text=caption)
-                            except Exception:
-                                pass
-                    else:
-                        try:
-                            await context.bot.send_message(chat_id=chat_id, text=caption)
-                        except Exception:
-                            pass
-            else:
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=caption)
-                except Exception:
-                    pass
         return
 
     if data.startswith("yacha_accept:"):
@@ -3190,18 +2462,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     delta = min(50, max(0, oexp))
                     oexp2 = max(0, oexp - delta)
                     cexp2 = cexp + delta
-                    olevel2 = compute_level(oexp2)[0]
-                    clevel2 = compute_level(cexp2)[0]
-                    oref.set({"total_exp": oexp2, "current_level": olevel2}, merge=True)
-                    cref.set({"total_exp": cexp2, "current_level": clevel2}, merge=True)
+                    oref.set({"total_exp": oexp2}, merge=True)
+                    cref.set({"total_exp": cexp2}, merge=True)
                 finally:
                     release_two_user_locks(lock1, lock2)
 
         set_active_duel(chat_id, None)
         transfer_line = (
-            f"EXP 이체: {loser_display} → {winner_display} ({delta} EXP)"
+            f"$WHAT 이체: {loser_display} → {winner_display} ({delta}$WHAT)"
             if delta > 0
-            else "EXP 이체: 없음"
+            else "$WHAT 이체: 없음"
         )
         await q.message.edit_text(f"결과: {winner_display} 승!\n{transfer_line}")
         return
@@ -3239,15 +2509,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             total_exp = int(udata.get("total_exp", 0))
             if total_exp < BASED_MALL_PRICE_EXP:
-                await q.message.edit_text(f"EXP가 부족합니다. (필요 {BASED_MALL_PRICE_EXP}EXP)")
+                await q.message.edit_text(f"$WHAT가 부족합니다. (필요 {BASED_MALL_PRICE_EXP}$WHAT)")
                 return
 
             total_exp -= BASED_MALL_PRICE_EXP
-            new_level = compute_level(total_exp)[0]
             uref.set(
                 {
                     "total_exp": total_exp,
-                    "current_level": new_level,
                     "sword_level": BASED_MALL_SWORD_LEVEL,
                     "defense_tickets_list": tickets_list,
                     "defense_tickets": tickets,
@@ -3256,7 +2524,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
 
         await q.message.edit_text(
-            f"구매 완료! [{sword_name(BASED_MALL_SWORD_LEVEL)}] 지급 완료. (-{BASED_MALL_PRICE_EXP}EXP)"
+            f"구매 완료! [{sword_name(BASED_MALL_SWORD_LEVEL)}] 지급 완료. (-{BASED_MALL_PRICE_EXP}$WHAT)"
         )
         return
 
@@ -3296,18 +2564,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
             prev_total = int(udata.get("total_exp", 0))
             new_total = prev_total + int(price)
-            new_level = compute_level(new_total)[0]
             uref.set(
                 {
                     "total_exp": new_total,
-                    "current_level": new_level,
                     "sword_level": SWORD_NONE_LEVEL,
                     "defense_tickets_list": tickets_list,
                     "defense_tickets": tickets,
                 },
                 merge=True,
             )
-        await q.message.edit_text(f"판매 완료! {int(price)}EXP를 획득했습니다.\n현재 검: 없음")
+        await q.message.edit_text(f"판매 완료! {int(price)}$WHAT를 획득했습니다.\n현재 검: 없음")
         return
 
     if data.startswith("sword_enhance:"):
@@ -3357,7 +2623,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             total_exp = int(udata.get("total_exp", 0))
             if total_exp < int(cost):
-                await q.message.edit_text(f"EXP가 부족합니다. (필요 {int(cost)}EXP)")
+                await q.message.edit_text(f"$WHAT가 부족합니다. (필요 {int(cost)}$WHAT)")
                 return
 
             total_exp -= int(cost)
@@ -3370,7 +2636,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 total_exp += cashback
                 cashback_msg = (
                     "대장장이 오른이 불쌍한 당신에게 Based 카드 캐시백 혜택을 줍니다 "
-                    f"받은 캐시백 : {cashback}EXP"
+                    f"받은 캐시백 : {cashback}$WHAT"
                 )
                 if tickets > 0:
                     tickets_list = tickets_list[1:]
@@ -3381,11 +2647,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     lvl2 = SWORD_NONE_LEVEL
                     msg = "강화 실패! 검이 파괴되어 사라졌습니다.\n" + cashback_msg
 
-            new_level = compute_level(total_exp)[0]
             uref.set(
                 {
                     "total_exp": total_exp,
-                    "current_level": new_level,
                     "sword_level": lvl2,
                     "defense_tickets_list": tickets_list,
                     "defense_tickets": tickets,
@@ -3398,7 +2662,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 [
                     [
                         InlineKeyboardButton(
-                            text=f"나무 검 사기 ({BASED_MALL_PRICE_EXP}EXP)",
+                            text=f"나무 검 사기 ({BASED_MALL_PRICE_EXP}$WHAT)",
                             callback_data=f"sword_buy_wood:{chat_id}:{uid}",
                         ),
                         InlineKeyboardButton(
@@ -3485,7 +2749,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             ]
         )
         await q.message.edit_text(
-            f"현재 소유한 [{sword_name(lvl)}]을 파시겠습니까? 판매가격 {int(price)}EXP",
+            f"현재 소유한 [{sword_name(lvl)}]을 파시겠습니까? 판매가격 {int(price)}$WHAT",
             reply_markup=kb,
         )
         return
@@ -3524,11 +2788,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
 
             total_exp -= BASED_MALL_PRICE_EXP
-            new_level = compute_level(total_exp)[0]
             uref.set(
                 {
                     "total_exp": total_exp,
-                    "current_level": new_level,
                     "sword_level": BASED_MALL_SWORD_LEVEL,
                     "defense_tickets_list": tickets_list,
                     "defense_tickets": tickets,
@@ -4059,28 +3321,8 @@ def main() -> None:
     from zoneinfo import ZoneInfo
  
     kst = ZoneInfo(KST_TZ)
-    application.job_queue.run_once(mafia_ensure_initialized_job, when=5)
-    application.job_queue.run_daily(mafia_rollover_job, time=time(0, 0, tzinfo=kst))
-    application.job_queue.run_daily(mafia_night_job, time=time(11, 0, tzinfo=kst))
-    application.job_queue.run_daily(mafia_night_job, time=time(15, 0, tzinfo=kst))
-    application.job_queue.run_daily(mafia_night_job, time=time(20, 0, tzinfo=kst))
-    application.job_queue.run_daily(mafia_reveal_job, time=time(23, 59, tzinfo=kst))
-    application.job_queue.run_daily(send_fever_start, time=time(19, 0, tzinfo=kst))
-    application.job_queue.run_daily(send_fever_end, time=time(23, 0, tzinfo=kst))
-    application.job_queue.run_daily(send_leaderboard, time=time(10, 0, tzinfo=kst))
-    application.job_queue.run_daily(send_leaderboard, time=time(14, 0, tzinfo=kst))
-    application.job_queue.run_daily(send_leaderboard, time=time(18, 0, tzinfo=kst))
-    application.job_queue.run_daily(send_leaderboard, time=time(22, 0, tzinfo=kst))
     application.job_queue.run_daily(treasure_notice_job, time=time(18, 0, tzinfo=kst))
     application.job_queue.run_daily(treasure_daily_add_job, time=time(19, 0, tzinfo=kst))
-
-    application.job_queue.run_repeating(pals_hatch_job, interval=60, first=10)
-    application.job_queue.run_repeating(pals_payout_job, interval=300, first=30)
-
-    try:
-        application.job_queue.run_once(send_event_end_message, when=EVENT_SHUTDOWN_AT_KST)
-    except Exception:
-        pass
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
