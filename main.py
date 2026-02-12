@@ -830,54 +830,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("해당 기능은 삭제되었습니다.")
         return
 
-    treasure_map: Dict[str, str] = {
-        "!섹스": "sex",
-        "!왈렛": "whalet",
-        "!에디슨": "edison",
-        "!베이스드": "based",
-        "!어머님은짜장면이싫다고하셨어": "mom_hates_jjajang",
-        "!베이스드에디슨": "based_edison",
-        "!캐리비안의해적": "pirates_of_caribbean",
-        "!너와나의연결고리": "link_between_you_and_me",
-        "!대한민국만세": "korea_manse",
-        "!스테이베이스드": "stay_based",
-        "!TGE": "tge",
-        "!스트레스": "stress",
-        "!펭귄": "penguin",
-        "!사무엘잭슨": "samuel_jackson",
-        "!왈렛그는감히전설이라할수있다": "whalet_legend",
-        "!엄마": "mom",
-        "!감자탕": "gamjatang",
-        "!펍펍펍펍펍펍펍펍펭펍펍펍펍펍": "pubpub",
-        "!트레이드에브리띵스펜드에브리웨어": "trade_everything_spend_everywhere",
-        "!트레이드에브리띵스펜드에브리웨어,": "trade_everything_spend_everywhere",
-        "!보물내놔": "give_me_treasure",
-        "!팬티속보물": "panty_treasure",
-        "!사토시나카모토": "satoshi_nakamoto",
-        "!슬픈젖꼭지증후군": "sad_nipple_syndrome",
-        "!태극기휘날리며": "taegukgi_waving",
-        "!어차피우승은동탄맘": "dontan_mom_wins_anyway",
-        "!뽀롱뽀롱뽀로로": "pororo_porong",
-        "!하츄핑보다좋은건시진핑": "xi_jinping_better_than_hachuping",
-        "!어머님은짜장면이싫다고하셨어반면에짬뽕은국물까지싹다비우셨지": "mom_hates_jjajang_but_ate_jjamppong",
-        "!별수호자에디슨": "star_guardian_edison",
-        "!사랑의추적자LEO": "heartseeker_leo",
-        "!수영장파티L": "pool_party_l",
-        "!돌아와요부산항에": "come_back_to_busan_port",
-        "!소환사의협곡": "summoners_rift",
-        "!인직만숙불쑥": "injik_mansuk_bulsuk",
-        "!인직만숙겸상": "injik_mansuk_gyeomsang",
-        "!어벤져스와마법사의돌": "avengers_and_sorcerers_stone",
-        "!아쉬워벌써열두시삼육분": "already_0036",
-        "!내이름은고난함정이죠": "my_name_is_gonan_trap",
-        "!어떻게이별까지사랑하겠누": "how_to_love_even_breakup",
-        "!불꽃카리스마원식": "fire_charisma_wonsik",
-        "!뉴모노울트라마이크로스코픽실리코볼케이노코니오시스": "pneumonoultramicroscopicsilicovolcanoconiosis",
-        "!그런데말의해입니다": "by_the_way_year_of_horse",
-        "!오이보다가지가맛있다": "eggplant_better_than_cucumber",
-        "!견우야미안해나도어쩔수없는여자인가봐": "gyeonwoo_sorry_cant_help_it_woman",
-        "!엄마미안해나도어쩔수없는흑우인가봐": "mom_sorry_cant_help_it_black_cow",
-    }
+    treasure_map: Dict[str, str] = {}
 
     db = get_firebase_client()
     cref = chat_ref(db, chat_id)
@@ -889,8 +842,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if not isinstance(cmd, str) or not cmd.strip().startswith("!"):
                 continue
             if not isinstance(key, str) or not key.strip():
-                continue
-            if cmd.strip() in treasure_map:
                 continue
             treasure_map[cmd.strip()] = key.strip()
 
