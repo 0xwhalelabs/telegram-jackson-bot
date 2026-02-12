@@ -2327,7 +2327,9 @@ async def _refresh_daily_treasures(db: firestore.Client, chat_id: int, dt: datet
         cdata = csnap.to_dict() if csnap.exists else {}
 
         if cdata.get("treasure_daily_date") == today:
-            return False
+            extra0 = cdata.get("extra_treasure_map")
+            if isinstance(extra0, dict) and len(extra0) == 5:
+                return False
 
         idx = int(cdata.get("treasure_daily_pool_index", 0))
         pool_len = len(TREASURE_DAILY_POOL)
@@ -2341,6 +2343,16 @@ async def _refresh_daily_treasures(db: firestore.Client, chat_id: int, dt: datet
         for cmd in picked:
             key = "daily_" + hashlib.md5(cmd.encode("utf-8")).hexdigest()[:12]
             extra2[cmd] = key
+
+        try:
+            cref.update(
+                {
+                    "extra_treasure_map": firestore.DELETE_FIELD,
+                    "treasures_found_global": firestore.DELETE_FIELD,
+                }
+            )
+        except Exception:
+            pass
 
         cref.set(
             {
