@@ -170,7 +170,27 @@ def compute_level(total_exp: int) -> Tuple[int, int, int]:
 
 
 def calculate_exp(message_text: str, dt: datetime) -> ExpResult:
-    return ExpResult(5, "fixed")
+    return ExpResult(20, "fixed")
+
+
+def _normalize_username(uname: str) -> str:
+    v = (uname or "").strip()
+    if v.startswith("@"): 
+        v = v[1:]
+    return v.strip()
+
+
+def _find_user_doc_by_username(db: firestore.Client, chat_id: int, username: str):
+    uname = _normalize_username(username)
+    if not uname:
+        return None
+    users_coll = chat_ref(db, int(chat_id)).collection("users")
+    docs = list(users_coll.where(filter=FieldFilter("username", "==", uname)).limit(1).stream())
+    if not docs:
+        docs = list(users_coll.where(filter=FieldFilter("username", "==", uname.lower())).limit(1).stream())
+    if not docs:
+        return None
+    return docs[0]
 
 
 def get_firebase_client() -> firestore.Client:
@@ -740,12 +760,6 @@ def next_mute_minutes(tier_today: int) -> int:
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_chat is None or update.effective_user is None:
-        return
-
-    if update.effective_user.is_bot or int(update.effective_user.id) == 777000:
-        return
-
     if update.message is None or update.message.text is None:
         return
 
@@ -995,6 +1009,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
 
         await update.message.reply_text("숨은 보물찾기에 성공하였습니다.")
+        return
+
+    if text.strip() == "!존스미스불러":
+        await update.message.reply_text("@smithjohnyeah")
         return
 
     if text.strip() == "!존스미스":
@@ -1893,6 +1911,124 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await handle_exp_query(update, context)
         return
 
+    if text.strip() == "!포상금":
+        if not is_owner(update):
+            await update.message.reply_text("권한이 없습니다.")
+            return
+
+        chat_id = int(update.effective_chat.id)
+        owner_id = get_owner_user_id()
+        if owner_id is None:
+            await update.message.reply_text("OWNER_USER_ID 설정이 필요합니다.")
+            return
+
+        context.chat_data["bounty_mode"] = {"scope": "", "step": "select"}
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="특정유저(유저네임)",
+                        callback_data=f"bounty_select:{chat_id}:{int(owner_id)}:user",
+                    ),
+                    InlineKeyboardButton(
+                        text="모든유저",
+                        callback_data=f"bounty_select:{chat_id}:{int(owner_id)}:all",
+                    ),
+                ]
+            ]
+        )
+        await update.message.reply_text("포상금 지급 대상을 선택해주세요.", reply_markup=kb)
+        return
+
+    bounty = context.chat_data.get("bounty_mode")
+    if is_owner(update) and bounty and isinstance(bounty, dict):
+        step = str(bounty.get("step") or "")
+        if step == "await_username":
+            uname = _normalize_username(text.strip())
+            if not uname:
+                await update.message.reply_text("유저네임을 입력해주세요. (예: @username)")
+                return
+            bounty["username"] = uname
+            bounty["step"] = "await_amount"
+            context.chat_data["bounty_mode"] = bounty
+            await update.message.reply_text("얼마를 지급하시겠습니까? (숫자)")
+            return
+
+        if step == "await_amount":
+            t = text.strip()
+            try:
+                amount = int(t)
+            except ValueError:
+                await update.message.reply_text("금액은 숫자로 입력해주세요.")
+                return
+            if amount <= 0:
+                await update.message.reply_text("금액은 1 이상의 숫자로 입력해주세요.")
+                return
+
+            chat_id = int(update.effective_chat.id)
+            db = get_firebase_client()
+            dt = now_kst()
+            today = kst_date_str(dt)
+
+            scope = str(bounty.get("scope") or "")
+            if scope == "all":
+                users = list(chat_ref(db, chat_id).collection("users").stream())
+                cnt = 0
+                for d in users:
+                    try:
+                        uid = int(d.id)
+                    except Exception:
+                        continue
+                    async with get_user_lock(chat_id, uid):
+                        uref = user_ref(db, chat_id, uid)
+                        snap = uref.get()
+                        udata = snap.to_dict() if snap.exists else {}
+                        total = int(udata.get("total_exp", 0)) + int(amount)
+                        uref.set(
+                            {"total_exp": total, "last_seen": dt, "last_active_date": today},
+                            merge=True,
+                        )
+                        cnt += 1
+                context.chat_data.pop("bounty_mode", None)
+                await update.effective_chat.send_message(
+                    f"포상금 지급 완료! 총 {cnt}명에게 {amount}$WHAT 지급"
+                )
+                return
+
+            if scope == "user":
+                uname = str(bounty.get("username") or "")
+                doc = _find_user_doc_by_username(db, chat_id, uname)
+                if doc is None:
+                    await update.message.reply_text(f"@{uname} 유저를 찾을 수 없습니다.")
+                    return
+                try:
+                    target_user_id = int(doc.id)
+                except Exception:
+                    await update.message.reply_text("대상 유저 정보가 유효하지 않습니다.")
+                    return
+
+                async with get_user_lock(chat_id, target_user_id):
+                    uref = user_ref(db, chat_id, target_user_id)
+                    snap = uref.get()
+                    udata = snap.to_dict() if snap.exists else {}
+                    prev_total = int(udata.get("total_exp", 0))
+                    new_total = prev_total + int(amount)
+                    display = udata.get("display") or (f"@{udata.get('username')}" if udata.get("username") else str(target_user_id))
+                    uref.set(
+                        {"total_exp": new_total, "last_seen": dt, "last_active_date": today},
+                        merge=True,
+                    )
+
+                context.chat_data.pop("bounty_mode", None)
+                await update.effective_chat.send_message(
+                    f"포상금 지급 완료! {display}님에게 {amount}$WHAT 지급"
+                )
+                return
+
+            context.chat_data.pop("bounty_mode", None)
+            await update.message.reply_text("포상금 설정이 유효하지 않습니다. 다시 `!포상금`부터 진행해주세요.")
+            return
+
     async with get_user_lock(update.effective_chat.id, update.effective_user.id):
         await _handle_message_locked(update, context)
 
@@ -2328,6 +2464,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = int(q.message.chat.id)
     allowed = get_allowed_chat_id()
     if allowed is not None and int(allowed) != chat_id:
+        return
+
+    if data.startswith("bounty_select:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, owner_id, scope = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(owner_id):
+            try:
+                await q.answer("권한이 없습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+        if scope not in ("user", "all"):
+            return
+
+        if scope == "user":
+            context.chat_data["bounty_mode"] = {"scope": "user", "step": "await_username"}
+            try:
+                await q.message.edit_text("포상금을 지급할 유저네임을 입력해주세요. (예: @username)")
+            except Exception:
+                pass
+            return
+
+        context.chat_data["bounty_mode"] = {"scope": "all", "step": "await_amount"}
+        try:
+            await q.message.edit_text("모든 유저에게 지급할 금액을 입력해주세요. (숫자)")
+        except Exception:
+            pass
         return
 
     if data.startswith("yacha_accept:"):
