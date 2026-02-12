@@ -869,6 +869,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"아직 숨겨져있는 보물은 총 {remaining}개 입니다.")
         return
 
+    if text.strip() == "!보물해금":
+        if not is_owner(update):
+            await update.message.reply_text("권한이 없습니다.")
+            return
+
+        allowed = get_allowed_chat_id()
+        if allowed is not None and int(allowed) != int(chat_id):
+            return
+
+        db = get_firebase_client()
+        dt = now_kst()
+        changed = await _refresh_daily_treasures(db, int(chat_id), dt, force=True)
+        if not changed:
+            await update.message.reply_text("이미 오늘의 보물이 준비되어 있습니다.")
+            return
+        await update.message.reply_text("보물 5개를 해금했습니다.")
+        return
+
     if text.strip() == "!보물힌트":
         user_id = int(update.effective_user.id)
         dt = now_kst()
@@ -2316,7 +2334,9 @@ TREASURE_DAILY_POOL: List[str] = [
 ]
 
 
-async def _refresh_daily_treasures(db: firestore.Client, chat_id: int, dt: datetime) -> bool:
+async def _refresh_daily_treasures(
+    db: firestore.Client, chat_id: int, dt: datetime, force: bool = False
+) -> bool:
     if not TREASURE_DAILY_POOL:
         return False
 
@@ -2326,7 +2346,7 @@ async def _refresh_daily_treasures(db: firestore.Client, chat_id: int, dt: datet
         csnap = cref.get()
         cdata = csnap.to_dict() if csnap.exists else {}
 
-        if cdata.get("treasure_daily_date") == today:
+        if not force and cdata.get("treasure_daily_date") == today:
             extra0 = cdata.get("extra_treasure_map")
             if isinstance(extra0, dict) and len(extra0) == 5:
                 return False
