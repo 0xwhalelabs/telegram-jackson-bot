@@ -923,12 +923,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         dt = now_kst()
         today = kst_date_str(dt)
 
+        owner_id = get_owner_user_id()
+
         async with get_user_lock(chat_id, user_id):
             uref = user_ref(db, chat_id, user_id)
+            snap0 = uref.get()
+            udata0 = snap0.to_dict() if snap0.exists else {}
+
+            if owner_id is None or int(user_id) != int(owner_id):
+                hint_date = udata0.get("treasure_hint_date")
+                hint_uses = int(udata0.get("treasure_hint_uses_today", 0))
+                if hint_date != today:
+                    hint_date = today
+                    hint_uses = 0
+                if hint_uses >= 2:
+                    await update.message.reply_text("보물힌트는 하루 2번만 사용할 수 있습니다.")
+                    return
+                hint_uses += 1
+            else:
+                hint_date = today
+                hint_uses = int(udata0.get("treasure_hint_uses_today", 0))
+
             uref.set(
                 {
                     "last_seen": dt,
                     "last_active_date": today,
+                    "treasure_hint_date": hint_date,
+                    "treasure_hint_uses_today": hint_uses,
                 },
                 merge=True,
             )
@@ -2311,83 +2332,78 @@ TREASURE_REWARD_EXP = 300
 
 
 TREASURE_DAILY_POOL: List[str] = [
-    "!어벤져스어셈블",
-    "!나는자연인이다",
-    "!니가가라하와이",
-    "!내가왕이될상인가",
-    "!라떼는말이야",
-    "!인생은실전이야",
-    "!나의검은당신의것이오",
-    "!내가빙다리핫바지로보이냐",
-    "!비탈릭바짓속불타는명멸검",
-    "!너내동료가돼라",
-    "!에디슨의베이스드",
-    "!오늘밤주인공은나야나",
-    "!나는전설이다",
-    "!오늘밤바라본저달이너무처량해",
-    "!저스트두잇나이키",
-    "!시기다른래퍼들의반대편을바라보던",
-    "!스즈메의입단속",
-    "!시간을달리는소녀",
-    "!난이게임을해봤어요",
+    "!소리에아이구배가터져게빛나여거덕인지도몰르구여기에나우드라이크헤이러탑원포더척원더라이크스테이션동네사람들",
+    "!맨정신이난젤싫어아무것도할수가없어",
+    "!아무일도없었다",
+    "!존스미스포츈의쌍권총난사",
+    "!사람들은모두변하나봐",
+    "!불꽃어리둥절원식",
+    "!시작이제일무서워미룬이",
+    "!존스미꾸라지한마리가온웅덩이를흐린다",
+    "!암쏘쏘뤼벗알라뷰다거짓말이야몰랐어이제야알았어",
+    "!피카츄라이츄파이리꼬츄",
+    "!그란데사이즈로말입니다",
+    "!베이스드는분명보여줄것이다",
+    "!아임파인땡큐앤쥬",
+    "!알러뷰3000",
+    "!존스미스가게이란사실을알고있는가",
     "!이래도지랄저래도지랄",
-    "!아버지날보고있다면정답을알려줘",
-    "!박나래와주사이모",
-    "!차은우의탈세이슈",
-    "!감스트의탈모이슈",
-    "!지금만나러갑니다",
-    "!인생은아름다워",
-    "!라면먹고갈래",
-    "!치키치키차카차카초코초코초",
-    "!다시만난세계",
-    "!이게바로나다",
-    "!지금이순간",
-    "!인생은타이밍",
-    "!아직끝난게아니야",
-    "!내꿈은이루어진다",
-    "!사랑은은하수다방",
-    "!니인생을살아",
-    "!메이크아메리카그레이트어게인",
-    "!설마했던니가나를떠나버렸어",
-    "!돌아보지말고떠나가라",
-    "!고마해라마이묵었다",
-    "!고래의꿈101억",
-    "!너무반짝반짝눈이부셔",
-    "!춤추는작은까탈레나",
-    "!차돌박이고추짬봉",
-    "!우리가함께한날들",
-    "!13일의금요일",
-    "!인생은짧고예술은길다",
-    "!사랑은움직이는거야",
-    "!어느새부터힙합은안멋져",
-    "!내가비트사라햇제",
-    "!베이스드는사랑이다",
-    "!화성갈끄니까",
-    "!마포대교는무너졌냐",
-    "!무적캡틴싸우르스",
-    "!어떻게이별까지사랑하겠누",
-    "!존스미스의오른손은오늘도바쁘다",
-    "!나는심장이없어",
-    "!왈렛유튜브구독좋아요알림설정",
-    "!지금이순간마법처럼",
-    "!날아무리짜도우유안나와",
+    "!베이스드많이사랑해주세요",
+    "!개리와기리리가두개그래서리쌍",
+    "!디지털골드는없었다",
+    "!아주입만열면그짓말이자동으로나와",
+    "!이뭔개소리야",
+    "!천사소녀네티",
+    "!해리포터와인피니티워",
+    "!거를타선이없다",
+    "!검은머리외국인",
+    "!상처를치료해줄사람어디없누",
+    "!젠장또이상혁이야",
+    "!엄그리고준투더식",
+    "!헤어지던밤찬바람이불었다",
+    "!왜또아픈상처에소금을뿌리십니까",
 ]
 
 
-async def treasure_notice_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    allowed = get_allowed_chat_id()
-    if allowed is None:
-        return
-    try:
-        await context.bot.send_message(
-            chat_id=int(allowed),
-            text=(
-                "잠시 후 오후 7시에 신규 보물 5개가 추가 될 예정입니다. "
-                "보물은 각각 300$WHAT를 지급합니다"
-            ),
+async def _refresh_daily_treasures(db: firestore.Client, chat_id: int, dt: datetime) -> bool:
+    if not TREASURE_DAILY_POOL:
+        return False
+
+    today = kst_date_str(dt)
+    async with get_chat_lock(int(chat_id)):
+        cref = chat_ref(db, int(chat_id))
+        csnap = cref.get()
+        cdata = csnap.to_dict() if csnap.exists else {}
+
+        if cdata.get("treasure_daily_date") == today:
+            return False
+
+        idx = int(cdata.get("treasure_daily_pool_index", 0))
+        pool_len = len(TREASURE_DAILY_POOL)
+        idx = idx % pool_len
+
+        picked: List[str] = []
+        for i in range(5):
+            picked.append(TREASURE_DAILY_POOL[(idx + i) % pool_len])
+
+        extra2: Dict[str, str] = {}
+        for cmd in picked:
+            key = "daily_" + hashlib.md5(cmd.encode("utf-8")).hexdigest()[:12]
+            extra2[cmd] = key
+
+        cref.set(
+            {
+                "chat_id": int(chat_id),
+                "extra_treasure_map": extra2,
+                "treasures_found_global": {},
+                "treasure_daily_pool_index": (idx + 5) % pool_len,
+                "treasure_daily_date": today,
+                "last_seen": dt,
+            },
+            merge=True,
         )
-    except Exception:
-        return
+
+    return True
 
 
 async def treasure_daily_add_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2401,50 +2417,29 @@ async def treasure_daily_add_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     dt = now_kst()
 
     chat_id = int(allowed)
-    async with get_chat_lock(chat_id):
-        cref = chat_ref(db, chat_id)
-        csnap = cref.get()
-        cdata = csnap.to_dict() if csnap.exists else {}
-
-        extra = cdata.get("extra_treasure_map")
-        if not isinstance(extra, dict):
-            extra = {}
-
-        idx = int(cdata.get("treasure_daily_pool_index", 0))
-        pool_len = len(TREASURE_DAILY_POOL)
-        idx = idx % pool_len
-
-        picked: List[str] = []
-        for i in range(5):
-            picked.append(TREASURE_DAILY_POOL[(idx + i) % pool_len])
-
-        extra2 = dict(extra)
-        for cmd in picked:
-            if cmd in extra2:
-                continue
-            key = "daily_" + hashlib.md5(cmd.encode("utf-8")).hexdigest()[:12]
-            extra2[cmd] = key
-
-        cref.set(
-            {
-                "chat_id": chat_id,
-                "extra_treasure_map": extra2,
-                "treasure_daily_pool_index": (idx + 5) % pool_len,
-                "last_seen": dt,
-            },
-            merge=True,
-        )
+    changed = await _refresh_daily_treasures(db, chat_id, dt)
+    if not changed:
+        return
 
     try:
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                "오후 7시 신규 보물 5개가 추가되었습니다. "
+                "00시 신규 보물 5개가 추가되었습니다. "
                 "보물은 각각 300$WHAT를 지급합니다"
             ),
         )
     except Exception:
         return
+
+
+async def treasure_startup_ensure_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed = get_allowed_chat_id()
+    if allowed is None:
+        return
+    db = get_firebase_client()
+    dt = now_kst()
+    await _refresh_daily_treasures(db, int(allowed), dt)
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3489,8 +3484,8 @@ def main() -> None:
     from zoneinfo import ZoneInfo
  
     kst = ZoneInfo(KST_TZ)
-    application.job_queue.run_daily(treasure_notice_job, time=time(18, 0, tzinfo=kst))
-    application.job_queue.run_daily(treasure_daily_add_job, time=time(19, 0, tzinfo=kst))
+    application.job_queue.run_once(treasure_startup_ensure_job, when=0)
+    application.job_queue.run_daily(treasure_daily_add_job, time=time(0, 0, tzinfo=kst))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
