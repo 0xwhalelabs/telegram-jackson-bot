@@ -887,6 +887,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("보물 5개를 해금했습니다.")
         return
 
+    if text.strip() == "!보물힌트초기화":
+        if not is_owner(update):
+            await update.message.reply_text("권한이 없습니다.")
+            return
+
+        allowed = get_allowed_chat_id()
+        if allowed is not None and int(allowed) != int(chat_id):
+            return
+
+        db = get_firebase_client()
+        dt = now_kst()
+        today = kst_date_str(dt)
+
+        users = list(chat_ref(db, int(chat_id)).collection("users").stream())
+        cnt = 0
+        for d in users:
+            try:
+                uid = int(d.id)
+            except Exception:
+                continue
+            async with get_user_lock(int(chat_id), uid):
+                uref = user_ref(db, int(chat_id), uid)
+                uref.set(
+                    {
+                        "treasure_hint_date": today,
+                        "treasure_hint_uses_today": 0,
+                        "last_seen": dt,
+                    },
+                    merge=True,
+                )
+                cnt += 1
+
+        await update.message.reply_text(f"보물힌트 횟수 초기화 완료 (대상 {cnt}명)")
+        return
+
     if text.strip() == "!보물힌트":
         user_id = int(update.effective_user.id)
         dt = now_kst()
