@@ -927,26 +927,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         dt = now_kst()
         today = kst_date_str(dt)
 
-        owner_id = get_owner_user_id()
-
         async with get_user_lock(chat_id, user_id):
             uref = user_ref(db, chat_id, user_id)
             snap0 = uref.get()
             udata0 = snap0.to_dict() if snap0.exists else {}
 
-            if owner_id is None or int(user_id) != int(owner_id):
-                hint_date = udata0.get("treasure_hint_date")
-                hint_uses = int(udata0.get("treasure_hint_uses_today", 0))
-                if hint_date != today:
-                    hint_date = today
-                    hint_uses = 0
-                if hint_uses >= 2:
-                    await update.message.reply_text("보물힌트는 하루 2번만 사용할 수 있습니다.")
-                    return
-                hint_uses += 1
-            else:
+            hint_date = udata0.get("treasure_hint_date")
+            hint_uses = int(udata0.get("treasure_hint_uses_today", 0))
+            if hint_date != today:
                 hint_date = today
-                hint_uses = int(udata0.get("treasure_hint_uses_today", 0))
+                hint_uses = 0
+
+            charge = 0
+            if hint_uses >= 2:
+                charge = 80
+                total_exp0 = int(udata0.get("total_exp", 0))
+                if total_exp0 < charge:
+                    await update.message.reply_text(
+                        f"잔고가 부족합니다. (필요 {charge}$WHAT, 보유 {total_exp0}$WHAT)"
+                    )
+                    return
+                uref.set({"total_exp": total_exp0 - charge}, merge=True)
+
+            hint_uses += 1
 
             uref.set(
                 {
@@ -982,7 +985,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         pick = random.choice(remaining_cmds)
         hint = mask_treasure_hint(pick)
-        await update.message.reply_text(f"남은 보물의 명령어는 {hint} 입니다.")
+        suffix = ""
+        if hint_uses > 2:
+            suffix = " (80$WHAT 차감)"
+        await update.message.reply_text(f"남은 보물의 명령어는 {hint} 입니다.{suffix}")
         return
     tkey = treasure_map.get(text.strip())
     if tkey is not None:
