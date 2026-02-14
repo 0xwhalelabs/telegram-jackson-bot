@@ -39,10 +39,19 @@ _USER_LOCKS: Dict[Tuple[int, int], asyncio.Lock] = {}
 _YACHA_DUELS: Dict[int, Dict[str, Any]] = {}
 
 
+_RR_GAMES: Dict[int, Dict[str, Any]] = {}
+
+
 _YACHA_CHAT_LOCKS: Dict[int, asyncio.Lock] = {}
 
 
+_RR_CHAT_LOCKS: Dict[int, asyncio.Lock] = {}
+
+
 _CHAT_LOCKS: Dict[int, asyncio.Lock] = {}
+
+
+_FISHING_SESSIONS: Dict[Tuple[int, int], bool] = {}
 
 
 def get_chat_lock(chat_id: int) -> asyncio.Lock:
@@ -51,6 +60,15 @@ def get_chat_lock(chat_id: int) -> asyncio.Lock:
     if lock is None:
         lock = asyncio.Lock()
         _CHAT_LOCKS[key] = lock
+    return lock
+
+
+def get_rr_chat_lock(chat_id: int) -> asyncio.Lock:
+    key = int(chat_id)
+    lock = _RR_CHAT_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _RR_CHAT_LOCKS[key] = lock
     return lock
 
 
@@ -257,6 +275,240 @@ def set_active_duel(chat_id: int, duel: Optional[Dict[str, Any]]) -> None:
         _YACHA_DUELS[key] = duel
 
 
+def get_active_rr(chat_id: int) -> Optional[Dict[str, Any]]:
+    return _RR_GAMES.get(int(chat_id))
+
+
+def set_active_rr(chat_id: int, game: Optional[Dict[str, Any]]) -> None:
+    key = int(chat_id)
+    if game is None:
+        _RR_GAMES.pop(key, None)
+    else:
+        _RR_GAMES[key] = game
+
+
+def user_link(user_id: int, label: str) -> str:
+    uid = int(user_id)
+    name = (label or str(uid)).replace("<", "").replace(">", "")
+    return f"<a href=\"tg://user?id={uid}\">{name}</a>"
+
+
+def rr_invite_job_name(chat_id: int, message_id: int) -> str:
+    return f"rr_invite_timeout:{int(chat_id)}:{int(message_id)}"
+
+
+def rr_action_job_name(chat_id: int, message_id: int) -> str:
+    return f"rr_action_tick:{int(chat_id)}:{int(message_id)}"
+
+
+def rr_cancel_jobs(context: ContextTypes.DEFAULT_TYPE, game: Dict[str, Any]) -> None:
+    try:
+        chat_id = int(game.get("chat_id") or 0)
+        message_id = int(game.get("message_id") or 0)
+    except Exception:
+        return
+
+    if chat_id <= 0 or message_id <= 0:
+        return
+    try:
+        for j in context.job_queue.get_jobs_by_name(rr_invite_job_name(chat_id, message_id)):
+            j.schedule_removal()
+    except Exception:
+        pass
+    try:
+        for j in context.job_queue.get_jobs_by_name(rr_action_job_name(chat_id, message_id)):
+            j.schedule_removal()
+    except Exception:
+        pass
+
+
+async def rr_set_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    game: Dict[str, Any],
+    base_text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    countdown: Optional[int] = None,
+) -> None:
+    chat_id = int(game.get("chat_id") or 0)
+    message_id = int(game.get("message_id") or 0)
+    if chat_id <= 0 or message_id <= 0:
+        return
+
+    game["status_text"] = base_text
+    game["last_reply_markup"] = reply_markup
+    if countdown is not None:
+        game["countdown_until"] = now_kst() + timedelta(seconds=int(countdown))
+    else:
+        game.pop("countdown_until", None)
+
+    text = base_text
+    if countdown is not None:
+        text = f"{base_text}\n\n남은 시간: {int(countdown)}초"
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+    except Exception:
+        return
+
+
+def rr_start_invite_timeout(context: ContextTypes.DEFAULT_TYPE, game: Dict[str, Any]) -> None:
+    rr_cancel_jobs(context, game)
+    chat_id = int(game.get("chat_id") or 0)
+    message_id = int(game.get("message_id") or 0)
+    if chat_id <= 0 or message_id <= 0:
+        return
+    context.job_queue.run_once(
+        rr_invite_timeout_job,
+        when=300,
+        name=rr_invite_job_name(chat_id, message_id),
+        data={"chat_id": chat_id, "message_id": message_id},
+    )
+
+
+def rr_start_action_timeout(
+    context: ContextTypes.DEFAULT_TYPE, game: Dict[str, Any], required_user_ids: List[int]
+) -> None:
+    rr_cancel_jobs(context, game)
+    chat_id = int(game.get("chat_id") or 0)
+    message_id = int(game.get("message_id") or 0)
+    if chat_id <= 0 or message_id <= 0:
+        return
+    game["required_user_ids"] = [int(x) for x in required_user_ids]
+    game["countdown_until"] = now_kst() + timedelta(seconds=30)
+    context.job_queue.run_repeating(
+        rr_action_tick_job,
+        interval=1,
+        first=0,
+        name=rr_action_job_name(chat_id, message_id),
+        data={"chat_id": chat_id, "message_id": message_id},
+    )
+
+
+async def rr_invite_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data or {}
+    chat_id = int(data.get("chat_id") or 0)
+    message_id = int(data.get("message_id") or 0)
+    if chat_id <= 0 or message_id <= 0:
+        return
+
+    async with get_rr_chat_lock(chat_id):
+        game = get_active_rr(chat_id)
+        if not game:
+            return
+        if int(game.get("message_id") or 0) != message_id:
+            return
+        if game.get("phase") != "invite":
+            return
+        set_active_rr(chat_id, None)
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="상대가 5분 안에 수락하지 않아 러시안룰렛이 취소되었습니다.",
+        )
+    except Exception:
+        return
+
+
+async def rr_action_tick_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data or {}
+    chat_id = int(data.get("chat_id") or 0)
+    message_id = int(data.get("message_id") or 0)
+    if chat_id <= 0 or message_id <= 0:
+        return
+
+    async with get_rr_chat_lock(chat_id):
+        game = get_active_rr(chat_id)
+        if not game:
+            context.job.schedule_removal()
+            return
+        if int(game.get("message_id") or 0) != message_id:
+            context.job.schedule_removal()
+            return
+        until = game.get("countdown_until")
+        if not until:
+            context.job.schedule_removal()
+            return
+        remaining = int((until - now_kst()).total_seconds())
+
+        base_text = str(game.get("status_text") or "")
+        phase = str(game.get("phase") or "")
+        required = game.get("required_user_ids")
+        if not isinstance(required, list):
+            required = []
+
+        reply_markup = game.get("last_reply_markup")
+        if remaining > 0:
+            text = f"{base_text}\n\n남은 시간: {remaining}초"
+        else:
+            forfeiter_id = 0
+            if phase == "rps":
+                choices = game.get("rps_choices")
+                if not isinstance(choices, dict):
+                    choices = {}
+                for uid in required:
+                    if str(int(uid)) not in choices:
+                        forfeiter_id = int(uid)
+                        break
+            elif phase == "order":
+                forfeiter_id = int(game.get("winner_id") or 0)
+            elif phase == "pick":
+                forfeiter_id = int(game.get("turn_id") or 0)
+
+            c_id = int(game.get("challenger_id") or 0)
+            o_id = int(game.get("opponent_id") or 0)
+            other_id = o_id if forfeiter_id == c_id else c_id
+            pot = int(game.get("pot") or 0)
+
+            if forfeiter_id and other_id and pot > 0:
+                db = get_firebase_client()
+                dt = now_kst()
+                lock1, lock2 = await acquire_two_user_locks(chat_id, c_id, o_id)
+                try:
+                    sref = user_ref(db, chat_id, other_id)
+                    ssnap = sref.get()
+                    sudata = ssnap.to_dict() if ssnap.exists else {}
+                    s_bal = int(sudata.get("total_exp", 0)) + pot
+                    sref.set({"total_exp": s_bal, "last_seen": dt}, merge=True)
+                finally:
+                    release_two_user_locks(lock1, lock2)
+
+            fdisp = user_link(
+                forfeiter_id,
+                str(game.get("challenger_display") if forfeiter_id == c_id else game.get("opponent_display")),
+            )
+            sdisp = user_link(
+                other_id,
+                str(game.get("challenger_display") if other_id == c_id else game.get("opponent_display")),
+            )
+            set_active_rr(chat_id, None)
+            text = (
+                f"시간 초과! {fdisp}님이 30초 내 선택하지 않아 기권패 처리되었습니다.\n"
+                f"{sdisp}님은 전리품으로 {pot}$WHAT을 획득하셨습니다."
+            )
+            reply_markup = None
+
+        if remaining <= 0:
+            context.job.schedule_removal()
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+    except Exception:
+        return
+
+
 def rps_result(a_choice: str, b_choice: str) -> int:
     beats = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
     if a_choice == b_choice:
@@ -267,6 +519,122 @@ def rps_result(a_choice: str, b_choice: str) -> int:
 
 
 PALS_EGG_PRICE_EXP = 100
+
+
+FISHING_TRASH_ITEMS: List[str] = [
+    "비탈릭의 휴지뭉치",
+    "부셔진 루나코인조각",
+    "샘 뱅크먼의 호소문",
+    "구겨진 밈코인 전단지",
+    "테더 영수증 찢어진 조각",
+    "잭슨의 미확인 수상한 USB",
+    "KOL의 눈물 젖은 DM",
+    "0.00000001BTC 적힌 수첩",
+]
+
+
+FISHING_COMMON_FISH: List[str] = [
+    "숭어",
+    "장어",
+    "복어",
+    "광어",
+    "놀래미",
+    "붕어",
+    "우럭",
+    "도다리",
+    "고등어",
+    "멸치",
+]
+
+
+FISHING_RARE_FISH: List[str] = [
+    "황금 참치",
+    "심해 아귀",
+    "전설의 철갑상어",
+    "레어 블루랍스터",
+    "유니콘 해마",
+]
+
+
+FISHING_SATOSHI_NOTE = "사토시의 비밀노트"
+
+
+def fishing_daily_limit(tool_level: int) -> int:
+    lvl = max(0, int(tool_level))
+    return 10 + (lvl * 2)
+
+
+def _get_fishing_session_key(chat_id: int, user_id: int) -> Tuple[int, int]:
+    return int(chat_id), int(user_id)
+
+
+def is_fishing_active(chat_id: int, user_id: int) -> bool:
+    return bool(_FISHING_SESSIONS.get(_get_fishing_session_key(chat_id, user_id)))
+
+
+def set_fishing_active(chat_id: int, user_id: int, active: bool) -> None:
+    key = _get_fishing_session_key(chat_id, user_id)
+    if not active:
+        _FISHING_SESSIONS.pop(key, None)
+        return
+    _FISHING_SESSIONS[key] = True
+
+
+def _coerce_int_dict(value: Any) -> Dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    out: Dict[str, int] = {}
+    for k, v in value.items():
+        if not isinstance(k, str):
+            continue
+        try:
+            out[k] = int(v)
+        except Exception:
+            continue
+    return out
+
+
+async def _ensure_daily_fish_prices(
+    db: firestore.Client, chat_id: int, dt: datetime, force: bool = False
+) -> Dict[str, int]:
+    today = kst_date_str(dt)
+    async with get_chat_lock(int(chat_id)):
+        cref = chat_ref(db, int(chat_id))
+        csnap = cref.get()
+        cdata = csnap.to_dict() if csnap.exists else {}
+
+        if not force and cdata.get("fish_market_date") == today:
+            prices = cdata.get("fish_prices")
+            if isinstance(prices, dict) and prices:
+                return {k: int(v) for k, v in prices.items() if isinstance(k, str)}
+
+        prices2: Dict[str, int] = {}
+        for name in FISHING_COMMON_FISH:
+            prices2[name] = random.randint(80, 150)
+        for name in FISHING_RARE_FISH:
+            prices2[name] = random.randint(500, 800)
+        prices2[FISHING_SATOSHI_NOTE] = 100_000
+
+        cref.set(
+            {
+                "chat_id": int(chat_id),
+                "fish_market_date": today,
+                "fish_prices": prices2,
+                "last_seen": dt,
+            },
+            merge=True,
+        )
+
+        return prices2
+
+
+async def fish_market_daily_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed = get_allowed_chat_id()
+    if allowed is None:
+        return
+    db = get_firebase_client()
+    dt = now_kst()
+    await _ensure_daily_fish_prices(db, int(allowed), dt, force=True)
 PALS_FEED_PRICE_EXP = 50
 
 PALS_TYPES: List[str] = [
@@ -565,6 +933,7 @@ def delete_collection(coll_ref: firestore.CollectionReference, batch_size: int =
 async def handle_reset_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None or update.effective_user is None or update.message is None:
         return
+
     if not is_allowed_chat(update):
         return
 
@@ -591,6 +960,7 @@ async def handle_reset_db(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     await update.message.reply_text(f"DB 초기화 완료. 삭제된 유저 데이터: {deleted_users}개")
+    return
 
 
 async def reset_user_by_username(
@@ -828,6 +1198,120 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if text.strip() in ("!알구매", "!먹이", "!마이팔"):
         await update.message.reply_text("해당 기능은 삭제되었습니다.")
+        return
+
+    if text.strip().startswith("!러시안룰렛"):
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 입력해 주세요."
+            )
+            return
+
+        parts = text.strip().split()
+        if len(parts) != 2:
+            await update.message.reply_text("사용법: !러시안룰렛 @유저네임")
+            return
+        if not is_username_token(parts[1]):
+            await update.message.reply_text("상대는 @유저네임 형태로 입력해주세요.")
+            return
+
+        chat_id_for_lock = int(update.effective_chat.id)
+        async with get_rr_chat_lock(chat_id_for_lock):
+            if get_active_rr(chat_id_for_lock) is not None:
+                await update.message.reply_text("현재 진행 중인 러시안룰렛이 있습니다.")
+                return
+
+            challenger_id = int(update.effective_user.id)
+            challenger_username = update.effective_user.username
+            challenger_display = (
+                f"@{challenger_username}"
+                if challenger_username
+                else (update.effective_user.full_name or str(challenger_id))
+            )
+
+            target_username = parse_username_token(parts[1])
+            db = get_firebase_client()
+            doc = _find_user_doc_by_username(db, chat_id_for_lock, target_username)
+            if doc is None:
+                await update.message.reply_text(f"@{target_username} 유저를 찾을 수 없습니다.")
+                return
+            try:
+                opponent_id = int(doc.id)
+            except Exception:
+                await update.message.reply_text("대상 유저 정보가 유효하지 않습니다.")
+                return
+            if opponent_id == challenger_id:
+                await update.message.reply_text("자기 자신에게는 러시안룰렛을 걸 수 없습니다.")
+                return
+
+            opponent_display = f"@{target_username}"
+
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            text="수락(300$WHAT)",
+                            callback_data=f"rr_invite:{chat_id_for_lock}:{challenger_id}:{opponent_id}:yes",
+                        ),
+                        InlineKeyboardButton(
+                            text="거절",
+                            callback_data=f"rr_invite:{chat_id_for_lock}:{challenger_id}:{opponent_id}:no",
+                        ),
+                    ]
+                ]
+            )
+
+            msg = await update.effective_chat.send_message(
+                f"{opponent_display} 님 {challenger_display}님의 러시안룰렛을 승낙하시겠습니까?",
+                reply_markup=kb,
+            )
+
+            game = {
+                    "chat_id": chat_id_for_lock,
+                    "message_id": int(msg.message_id),
+                    "challenger_id": challenger_id,
+                    "challenger_display": challenger_display,
+                    "opponent_id": opponent_id,
+                    "opponent_display": opponent_display,
+                    "accepted": False,
+                    "pot": 0,
+                    "rps_choices": {},
+                    "winner_id": None,
+                    "turn_id": None,
+                    "bullet_slot": random.randint(1, 6),
+                    "picked_slots": [],
+                    "phase": "invite",
+                    "created_at": now_kst(),
+                    "status_text": f"{opponent_display} 님 {challenger_display}님의 러시안룰렛을 승낙하시겠습니까?",
+                    "last_reply_markup": kb,
+                }
+            set_active_rr(chat_id_for_lock, game)
+            rr_start_invite_timeout(context, game)
+        return
+
+    if text.strip() == "!룰렛종료":
+        if not is_owner(update):
+            await update.message.reply_text("권한이 없습니다.")
+            return
+        chat_id_for_lock = int(update.effective_chat.id)
+        async with get_rr_chat_lock(chat_id_for_lock):
+            game = get_active_rr(chat_id_for_lock)
+            if not game:
+                await update.message.reply_text("진행 중인 러시안룰렛이 없습니다.")
+                return
+            rr_cancel_jobs(context, game)
+            set_active_rr(chat_id_for_lock, None)
+            mid = int(game.get("message_id") or 0)
+        if mid:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id_for_lock,
+                    message_id=mid,
+                    text="방장에 의해 러시안룰렛이 종료되었습니다.",
+                )
+            except Exception:
+                pass
         return
 
     treasure_map: Dict[str, str] = {}
@@ -1097,6 +1581,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "- !덤벼고래: 방장에게만 도전 가능한 가위바위보\n"
             "  (하루 2회, 이기면 방장 $WHAT에서 최대 50$WHAT 획득)\n"
             "\n"
+            "[러시안룰렛]\n"
+            "- !러시안룰렛 @상대: 러시안룰렛 도전(상대 수락 시 300$WHAT)\n"
+            "- !러시안룰: 러시안룰렛 규칙/타임아웃 설명\n"
+            "- !룰렛종료: 방장 전용 강제 종료\n"
+            "\n"
             "[보물]\n"
             "- !남은보물: 남은 보물 개수 확인\n"
             "- !보물힌트: 남은 보물 중 랜덤 힌트\n"
@@ -1105,12 +1594,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "- !인벤토리: 현재 검/방어티켓 확인\n"
             "- !강화확률: 강화 단계별 비용/확률/판매가 확인\n"
             "- !오른: 강화 진행(확정 버튼)\n"
-            "- !당근마켓: 현재 검 판매(확정 버튼)\n"
+            "- !당근마켓: 검/물고기 판매(버튼)\n"
             f"- !베이스드몰: 검 구매({BASED_MALL_PRICE_EXP}$WHAT, 검이 없을 때만 가능)\n"
             "- !강화비용: 강화 비용/판매가\n"
             "\n"
+            "[낚시]\n"
+            "- !낚시: 낚시 1회 진행(하루 횟수 제한)\n"
+            "- !낚시끝: 낚시 종료\n"
+            "- !낚시법: 낚시 규칙/시세/판매/교환 설명\n"
+            "\n"
             "[기타]\n"
             "- !whoami: 내 USER_ID/USERNAME 확인\n"
+        )
+        return
+
+    if text.strip() == "!낚시법":
+        await update.message.reply_text(
+            "[낚시 안내]\n"
+            "- !낚시: 1회 낚시(캐스팅) 진행\n"
+            "- !낚시끝: 낚시 종료(남은 횟수는 유지)\n"
+            "\n"
+            "[하루 낚시 횟수]\n"
+            "- 기본: 10회\n"
+            "- 장비 레벨 보정: 10 + (레벨*2)\n"
+            "  (낚싯대 보유 시 낚싯대 레벨, 없으면 검 레벨 기준)\n"
+            "\n"
+            "[검↔낚싯대 교환]\n"
+            "- !오른 에서 검→낚싯대 교환 가능\n"
+            "- 낚싯대는 판매 불가(당근마켓에서 검 판매 안 됨)\n"
+            "- 언제든 낚싯대→검으로 되돌려 강화/판매 가능\n"
+            "\n"
+            "[물고기 시세/판매]\n"
+            "- 물고기 시세는 매일 00:00(KST)에 변동\n"
+            "- !당근마켓에서 물고기 전부 판매 가능\n"
+            "- 사토시의 비밀노트는 개당 100000$WHAT\n"
+        )
+        return
+
+    if text.strip() == "!러시안룰":
+        await update.message.reply_text(
+            "[러시안룰렛 안내]\n"
+            "- !러시안룰렛 @상대: 도전\n"
+            "- 상대가 수락하면 300$WHAT이 걸립니다(수락자 300$WHAT 차감)\n"
+            "\n"
+            "[진행]\n"
+            "1) 수락/거절\n"
+            "2) 가위바위보로 승자 결정\n"
+            "3) 승자가 선공/후공 선택\n"
+            "4) 1~6 숫자 선택을 번갈아 진행(탄창 6칸, 총알 1발 랜덤)\n"
+            "\n"
+            "[승리/보상]\n"
+            "- 총알 맞은 사람은 사망(패배)\n"
+            "- 생존자가 300$WHAT 획득\n"
+            "\n"
+            "[타임아웃]\n"
+            "- 초대 5분 내 미수락 시 자동 취소\n"
+            "- 수락 이후 각 단계 30초 내 미선택 시 자동 기권패(상대가 300$WHAT 획득)\n"
+            "\n"
+            "[종료]\n"
+            "- !룰렛종료: 방장 전용 강제 종료\n"
         )
         return
 
@@ -1412,7 +1954,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     },
                     merge=True,
                 )
-            if lvl == SWORD_NONE_LEVEL:
+            rod_lvl = udata.get("fishing_rod_level")
+            fish_inv = _coerce_int_dict(udata.get("fish_inventory"))
+            note_cnt = int(udata.get("satoshi_note", 0))
+
+            if rod_lvl is not None and lvl == SWORD_NONE_LEVEL:
+                lines = [
+                    f"{display}님 현재 낚싯대 [{sword_name(int(rod_lvl))}]를 보유 중입니다.",
+                    f"강화 방어티켓: {tickets}장",
+                ]
+            elif lvl == SWORD_NONE_LEVEL:
                 lines = [f"{display}님 현재 검이 없습니다.", f"강화 방어티켓: {tickets}장"]
             else:
                 lines = [
@@ -1420,11 +1971,139 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     f"강화 방어티켓: {tickets}장",
                 ]
 
+            fish_cnt = sum(int(v) for v in fish_inv.values())
+            if fish_cnt > 0 or note_cnt > 0:
+                lines.append(f"물고기 보유: {fish_cnt}마리 / 비밀노트: {note_cnt}개")
+
             for i, exp_at in enumerate(tickets_list, start=1):
                 remain = int((exp_at - dt).total_seconds())
                 lines.append(f"방어권{i} : {_format_remaining_hhmm(remain)} 남음")
 
             await update.message.reply_text("\n".join(lines))
+        return
+
+    if text.strip() in ("!낚시", "!낚시끝"):
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 `!낚시`를 입력해 주세요."
+            )
+            return
+
+        chat_id = int(update.effective_chat.id)
+        user_id = int(update.effective_user.id)
+        username = update.effective_user.username
+        display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+
+        if text.strip() == "!낚시끝":
+            set_fishing_active(chat_id, user_id, False)
+            await update.message.reply_text(f"{display} 낚시를 종료했습니다.")
+            return
+
+        async with get_user_lock(chat_id, user_id):
+            db = get_firebase_client()
+            dt = now_kst()
+            today = kst_date_str(dt)
+
+            uref = user_ref(db, chat_id, user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+
+            sword_lvl, _ = sword_state_from_udata(udata)
+            rod_lvl = udata.get("fishing_rod_level")
+            tool_lvl = int(rod_lvl) if rod_lvl is not None else int(sword_lvl if sword_lvl != SWORD_NONE_LEVEL else 0)
+            if tool_lvl < 0:
+                tool_lvl = 0
+
+            if sword_lvl == SWORD_NONE_LEVEL and rod_lvl is None:
+                await update.message.reply_text(f"{display}님은 낚시할 장비가 없습니다. (검 또는 낚싯대 필요)")
+                return
+
+            limit = fishing_daily_limit(tool_lvl)
+            uses_date = udata.get("fishing_uses_date")
+            uses_today = int(udata.get("fishing_uses_today", 0))
+            if uses_date != today:
+                uses_today = 0
+                uses_date = today
+
+            remaining = max(0, limit - uses_today)
+            if remaining <= 0:
+                await update.message.reply_text(f"{display}님 오늘 낚시 가능 횟수를 모두 사용했습니다. (하루 {limit}회)")
+                return
+
+            set_fishing_active(chat_id, user_id, True)
+
+            prices = await _ensure_daily_fish_prices(db, chat_id, dt)
+            fish_inv = _coerce_int_dict(udata.get("fish_inventory"))
+            note_cnt = int(udata.get("satoshi_note", 0))
+            tickets_list, t_changed = defense_tickets_list_from_udata(udata, dt)
+
+            weights = [80.0, 40.0, 20.0, 1.0, 0.05]
+            pick = random.random() * sum(weights)
+            cat = "trash"
+            acc = 0.0
+            for name, w in zip(["trash", "common", "rare", "ticket", "note"], weights):
+                acc += float(w)
+                if pick <= acc:
+                    cat = name
+                    break
+
+            loot_name = ""
+            loot_value = 0
+            if cat == "trash":
+                loot_name = random.choice(FISHING_TRASH_ITEMS)
+                loot_value = 0
+            elif cat == "common":
+                loot_name = random.choice(FISHING_COMMON_FISH)
+                fish_inv[loot_name] = int(fish_inv.get(loot_name, 0)) + 1
+                loot_value = int(prices.get(loot_name, 0))
+            elif cat == "rare":
+                loot_name = random.choice(FISHING_RARE_FISH)
+                fish_inv[loot_name] = int(fish_inv.get(loot_name, 0)) + 1
+                loot_value = int(prices.get(loot_name, 0))
+            elif cat == "ticket":
+                loot_name = "강화 방어권"
+                tickets_list.append(dt + timedelta(seconds=DEFENSE_TICKET_TTL_SECONDS))
+                loot_value = random.randint(5000, 8000)
+            else:
+                loot_name = FISHING_SATOSHI_NOTE
+                note_cnt += 1
+                loot_value = 100_000
+
+            uses_today += 1
+            remaining_after = max(0, limit - uses_today)
+
+            uref.set(
+                {
+                    "user_id": user_id,
+                    "username": username or None,
+                    "display": display,
+                    "fish_inventory": fish_inv,
+                    "satoshi_note": note_cnt,
+                    "defense_tickets_list": tickets_list,
+                    "defense_tickets": len(tickets_list),
+                    "fishing_uses_date": uses_date,
+                    "fishing_uses_today": uses_today,
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+
+        price_line = ""
+        if loot_name in prices:
+            price_line = f"오늘 시세: {int(prices.get(loot_name, 0))}$WHAT"
+        elif loot_name == FISHING_SATOSHI_NOTE:
+            price_line = "오늘 시세: 100000$WHAT"
+
+        await update.message.reply_text(
+            f"{display} 낚시!\n"
+            f"획득: {loot_name}\n"
+            f"가치: {loot_value}$WHAT\n"
+            + (price_line + "\n" if price_line else "")
+            + f"남은 횟수: {remaining_after}/{limit}\n"
+            "종료: !낚시끝"
+        )
         return
 
     if text.strip() == "!강화확률":
@@ -1470,39 +2149,79 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user_id = int(update.effective_user.id)
         async with get_user_lock(chat_id, user_id):
             db = get_firebase_client()
+            dt = now_kst()
             uref = user_ref(db, chat_id, user_id)
             snap = uref.get()
             udata = snap.to_dict() if snap.exists else {}
             lvl, _ = sword_state_from_udata(udata)
             price = sword_sell_price(lvl)
+            rod_lvl = udata.get("fishing_rod_level")
+            fish_inv = _coerce_int_dict(udata.get("fish_inventory"))
+            note_cnt = int(udata.get("satoshi_note", 0))
             username = update.effective_user.username
             display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
-            if lvl == SWORD_NONE_LEVEL:
-                await update.message.reply_text(f"{display}님 현재 검이 없습니다.")
+
+            has_sword_sell = lvl != SWORD_NONE_LEVEL and price is not None
+            has_fish_sell = bool(fish_inv) or note_cnt > 0
+
+            if not has_sword_sell and not has_fish_sell:
+                if rod_lvl is not None and lvl == SWORD_NONE_LEVEL:
+                    await update.message.reply_text(f"{display}님은 낚싯대 상태라 검 판매가 불가능합니다. (물고기도 없음)")
+                else:
+                    await update.message.reply_text(f"{display}님 판매할 물건이 없습니다.")
                 return
-            if price is None:
-                await update.message.reply_text(
-                    f"{display}님 현재 소유한 [{sword_name(lvl)}]은(는) 판매 불가입니다."
-                )
-                return
-            kb = InlineKeyboardMarkup(
-                [
+
+            prices = await _ensure_daily_fish_prices(db, chat_id, dt)
+            fish_total = 0
+            fish_lines: List[str] = []
+            for name, cnt in sorted(fish_inv.items()):
+                if cnt <= 0:
+                    continue
+                p = int(prices.get(name, 0))
+                fish_total += p * int(cnt)
+                fish_lines.append(f"- {name} x{int(cnt)} (개당 {p}$WHAT)")
+            if note_cnt > 0:
+                fish_total += 100_000 * int(note_cnt)
+                fish_lines.append(f"- {FISHING_SATOSHI_NOTE} x{int(note_cnt)} (개당 100000$WHAT)")
+
+            rows: List[List[InlineKeyboardButton]] = []
+            if has_sword_sell:
+                rows.append(
                     [
                         InlineKeyboardButton(
-                            text="판매하기",
+                            text=f"검 판매 ({int(price)}$WHAT)",
                             callback_data=f"sword_sell:{chat_id}:{user_id}:yes",
-                        ),
-                        InlineKeyboardButton(
-                            text="취소",
-                            callback_data=f"sword_sell:{chat_id}:{user_id}:no",
-                        ),
+                        )
                     ]
+                )
+            if has_fish_sell:
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"물고기 전부 판매 (+{int(fish_total)}$WHAT)",
+                            callback_data=f"fish_sell_all:{chat_id}:{user_id}:yes",
+                        )
+                    ]
+                )
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="취소",
+                        callback_data=f"market_close:{chat_id}:{user_id}:ok",
+                    )
                 ]
             )
-            await update.message.reply_text(
-                f"{display}님 현재 소유한 [{sword_name(lvl)}]을 파시겠습니까? 판매가격 {int(price)}$WHAT",
-                reply_markup=kb,
-            )
+            kb = InlineKeyboardMarkup(rows)
+
+            lines = [f"{display} 당근마켓"]
+            if has_sword_sell:
+                lines.append(f"- 보유 검: [{sword_name(lvl)}] 판매가 {int(price)}$WHAT")
+            if fish_lines:
+                lines.append("- 보유 물고기/")
+                lines.extend(fish_lines)
+                lines.append(f"- 예상 판매 총액: {int(fish_total)}$WHAT")
+
+            await update.message.reply_text("\n".join(lines), reply_markup=kb)
         return
 
     if text.strip() == "!오른":
@@ -1532,25 +2251,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     },
                     merge=True,
                 )
-            nxt = sword_next_upgrade_info(lvl)
+            rod_lvl = udata.get("fishing_rod_level")
+            nxt = sword_next_upgrade_info(lvl) if lvl != SWORD_NONE_LEVEL else None
             username = update.effective_user.username
             display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
-            if lvl == SWORD_NONE_LEVEL:
+
+            if lvl == SWORD_NONE_LEVEL and rod_lvl is None:
                 await update.message.reply_text(f"{display}님 현재 검이 없습니다.")
                 return
-            if nxt is None:
-                await update.message.reply_text(f"{display}님은 이미 최종 검을 보유 중입니다.")
-                return
-            nxt_level, rate, cost, sell, nxt_name = nxt
-            sell_txt = "판매 불가" if sell is None else f"{int(sell)}EXP"
+
+            nxt_level = 0
+            rate = 0.0
+            cost = 0
+            sell = None
+            nxt_name = ""
+            sell_txt = "판매 불가"
+            if nxt is not None:
+                nxt_level, rate, cost, sell, nxt_name = nxt
+                sell_txt = "판매 불가" if sell is None else f"{int(sell)}EXP"
 
             extra_lines: List[str] = []
             for i, exp_at in enumerate(tickets_list, start=1):
                 remain = int((exp_at - dt).total_seconds())
                 extra_lines.append(f"방어권{i} : {_format_remaining_hhmm(remain)} 남음")
             extra_txt = "\n" + "\n".join(extra_lines) if extra_lines else ""
-            kb = InlineKeyboardMarkup(
-                [
+
+            rows: List[List[InlineKeyboardButton]] = []
+            if lvl != SWORD_NONE_LEVEL and nxt is not None:
+                rows.append(
                     [
                         InlineKeyboardButton(
                             text="강화하기",
@@ -1561,15 +2289,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             callback_data=f"sword_enhance:{chat_id}:{user_id}:no",
                         ),
                     ]
-                ]
-            )
-            await update.message.reply_text(
-                f"{display}님의 [{sword_name(lvl)}]을 강화 하시겠습니까?\n"
-                f"강화확률 {rate*100:.2f}%, 강화비용 {int(cost)}$WHAT\n"
-                f"강화 후 검[{nxt_name}] 당근마켓 시세 {sell_txt}\n"
-                f"보유 방어티켓: {tickets}장" + extra_txt,
-                reply_markup=kb,
-            )
+                )
+            elif lvl != SWORD_NONE_LEVEL and nxt is None:
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text="취소",
+                            callback_data=f"sword_enhance_stop:{chat_id}:{user_id}",
+                        )
+                    ]
+                )
+
+            if lvl != SWORD_NONE_LEVEL and rod_lvl is None:
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text="검→낚싯대 교환",
+                            callback_data=f"rod_exchange:{chat_id}:{user_id}:to_rod",
+                        )
+                    ]
+                )
+            if rod_lvl is not None and lvl == SWORD_NONE_LEVEL:
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text="낚싯대→검 교환",
+                            callback_data=f"rod_exchange:{chat_id}:{user_id}:to_sword",
+                        )
+                    ]
+                )
+
+            kb = InlineKeyboardMarkup(rows) if rows else None
+
+            if lvl != SWORD_NONE_LEVEL:
+                if nxt is None:
+                    msg = f"{display}님은 이미 최종 검을 보유 중입니다.\n보유 방어티켓: {tickets}장" + extra_txt
+                else:
+                    msg = (
+                        f"{display}님의 [{sword_name(lvl)}]을 강화 하시겠습니까?\n"
+                        f"강화확률 {rate*100:.2f}%, 강화비용 {int(cost)}$WHAT\n"
+                        f"강화 후 검[{nxt_name}] 당근마켓 시세 {sell_txt}\n"
+                        f"보유 방어티켓: {tickets}장" + extra_txt
+                    )
+            else:
+                msg = (
+                    f"{display}님은 낚싯대를 보유 중입니다.\n"
+                    f"낚싯대 등급: [{sword_name(int(rod_lvl))}]\n"
+                    f"보유 방어티켓: {tickets}장" + extra_txt
+                )
+
+            await update.message.reply_text(msg, reply_markup=kb)
         return
 
     if text.strip() == "!출첵":
@@ -2514,6 +3283,510 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await q.message.edit_text("모든 유저에게 지급할 금액을 입력해주세요. (숫자)")
         except Exception:
             pass
+        return
+
+    if data.startswith("market_close:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, uid, _ = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            return
+        try:
+            await q.message.edit_text("당근마켓을 종료했습니다.")
+        except Exception:
+            pass
+        return
+
+    if data.startswith("fish_sell_all:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, uid, decision = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("본인만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+        if decision != "yes":
+            try:
+                await q.message.edit_text("판매가 취소되었습니다.")
+            except Exception:
+                pass
+            return
+
+        db = get_firebase_client()
+        dt = now_kst()
+        today = kst_date_str(dt)
+        target_user_id = int(uid)
+        async with get_user_lock(chat_id, target_user_id):
+            uref = user_ref(db, chat_id, target_user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            fish_inv = _coerce_int_dict(udata.get("fish_inventory"))
+            note_cnt = int(udata.get("satoshi_note", 0))
+            if not fish_inv and note_cnt <= 0:
+                try:
+                    await q.message.edit_text("판매할 물고기가 없습니다.")
+                except Exception:
+                    pass
+                return
+
+            prices = await _ensure_daily_fish_prices(db, chat_id, dt)
+            total = 0
+            for name, cnt in fish_inv.items():
+                if int(cnt) <= 0:
+                    continue
+                total += int(prices.get(name, 0)) * int(cnt)
+            if note_cnt > 0:
+                total += 100_000 * int(note_cnt)
+
+            prev_total = int(udata.get("total_exp", 0))
+            new_total = prev_total + int(total)
+            uref.set(
+                {
+                    "total_exp": new_total,
+                    "fish_inventory": {},
+                    "satoshi_note": 0,
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+
+        try:
+            await q.message.edit_text(f"물고기 판매 완료! +{int(total)}$WHAT")
+        except Exception:
+            pass
+        return
+
+    if data.startswith("rod_exchange:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, uid, mode = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("본인만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+        if mode not in ("to_rod", "to_sword"):
+            return
+
+        db = get_firebase_client()
+        dt = now_kst()
+        today = kst_date_str(dt)
+        target_user_id = int(uid)
+        async with get_user_lock(chat_id, target_user_id):
+            uref = user_ref(db, chat_id, target_user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            sword_lvl, _ = sword_state_from_udata(udata)
+            rod_lvl = udata.get("fishing_rod_level")
+
+            if mode == "to_rod":
+                if sword_lvl == SWORD_NONE_LEVEL:
+                    try:
+                        await q.answer("검이 없어 교환할 수 없습니다.", show_alert=True)
+                    except Exception:
+                        return
+                    return
+                if rod_lvl is not None:
+                    try:
+                        await q.answer("이미 낚싯대를 보유 중입니다.", show_alert=True)
+                    except Exception:
+                        return
+                    return
+                uref.set(
+                    {
+                        "sword_level": SWORD_NONE_LEVEL,
+                        "fishing_rod_level": int(sword_lvl),
+                        "last_seen": dt,
+                        "last_active_date": today,
+                    },
+                    merge=True,
+                )
+                try:
+                    await q.message.edit_text(
+                        f"검을 낚싯대로 교환했습니다.\n"
+                        f"현재 낚싯대: [{sword_name(int(sword_lvl))}]\n"
+                        "언제든 !오른 에서 다시 검으로 교환할 수 있습니다."
+                    )
+                except Exception:
+                    pass
+                return
+
+            if rod_lvl is None:
+                try:
+                    await q.answer("낚싯대가 없어 교환할 수 없습니다.", show_alert=True)
+                except Exception:
+                    return
+                return
+            if sword_lvl != SWORD_NONE_LEVEL:
+                try:
+                    await q.answer("이미 검을 보유 중입니다.", show_alert=True)
+                except Exception:
+                    return
+                return
+
+            uref.set(
+                {
+                    "sword_level": int(rod_lvl),
+                    "fishing_rod_level": firestore.DELETE_FIELD,
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+            try:
+                await q.message.edit_text(
+                    f"낚싯대를 검으로 교환했습니다.\n현재 검: [{sword_name(int(rod_lvl))}]"
+                )
+            except Exception:
+                pass
+        return
+
+    if data.startswith("rr_invite:"):
+        parts = data.split(":")
+        if len(parts) != 5:
+            return
+        _, cid, challenger_id, opponent_id, decision = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(opponent_id):
+            try:
+                await q.answer("상대만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+
+        async with get_rr_chat_lock(chat_id):
+            game = get_active_rr(chat_id)
+            if game is None:
+                return
+            if int(game.get("challenger_id")) != int(challenger_id) or int(game.get("opponent_id")) != int(opponent_id):
+                return
+            if int(game.get("message_id")) != int(q.message.message_id):
+                return
+            if game.get("phase") != "invite":
+                return
+
+            if decision != "yes":
+                rr_cancel_jobs(context, game)
+                set_active_rr(chat_id, None)
+                try:
+                    await q.message.edit_text("러시안룰렛이 거절되었습니다.")
+                except Exception:
+                    pass
+                return
+
+            db = get_firebase_client()
+            dt = now_kst()
+            lock1, lock2 = await acquire_two_user_locks(chat_id, int(challenger_id), int(opponent_id))
+            try:
+                uref = user_ref(db, chat_id, int(opponent_id))
+                snap = uref.get()
+                udata = snap.to_dict() if snap.exists else {}
+                bal = int(udata.get("total_exp", 0))
+                if bal < 300:
+                    try:
+                        await q.message.edit_text("잔고가 부족하여 수락할 수 없습니다. (필요 300$WHAT)")
+                    except Exception:
+                        pass
+                    rr_cancel_jobs(context, game)
+                    set_active_rr(chat_id, None)
+                    return
+                uref.set({"total_exp": bal - 300, "last_seen": dt}, merge=True)
+            finally:
+                release_two_user_locks(lock1, lock2)
+
+            game["accepted"] = True
+            game["pot"] = 300
+            game["phase"] = "rps"
+            game["rps_choices"] = {}
+            set_active_rr(chat_id, game)
+
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            text="가위",
+                            callback_data=f"rr_rps:{chat_id}:{challenger_id}:{opponent_id}:scissors",
+                        ),
+                        InlineKeyboardButton(
+                            text="바위",
+                            callback_data=f"rr_rps:{chat_id}:{challenger_id}:{opponent_id}:rock",
+                        ),
+                        InlineKeyboardButton(
+                            text="보",
+                            callback_data=f"rr_rps:{chat_id}:{challenger_id}:{opponent_id}:paper",
+                        ),
+                    ]
+                ]
+            )
+            cdisp = user_link(int(challenger_id), str(game.get("challenger_display") or str(challenger_id)))
+            odisp = user_link(int(opponent_id), str(game.get("opponent_display") or str(opponent_id)))
+            base = (
+                "존스미스의 러시안룰렛이 시작됩니다.\n"
+                "탄창은 6칸이며 랜덤 칸에 총알이 장전되어 있습니다. 가위바위보를 하여 순서정하기를 시작합니다.\n"
+                f"{cdisp}과 {odisp}는 가위 바위 보 중 하나를 골라주세요."
+            )
+            await rr_set_message(context, game, base, reply_markup=kb, countdown=30)
+            set_active_rr(chat_id, game)
+            rr_start_action_timeout(context, game, [int(challenger_id), int(opponent_id)])
+        return
+
+    if data.startswith("rr_rps:"):
+        parts = data.split(":")
+        if len(parts) != 5:
+            return
+        _, cid, challenger_id, opponent_id, choice = parts
+        if int(cid) != chat_id:
+            return
+        if choice not in ("rock", "paper", "scissors"):
+            return
+
+        uid = int(q.from_user.id) if q.from_user else 0
+        if uid not in (int(challenger_id), int(opponent_id)):
+            return
+
+        async with get_rr_chat_lock(chat_id):
+            game = get_active_rr(chat_id)
+            if game is None or game.get("phase") != "rps":
+                return
+            if int(game.get("message_id")) != int(q.message.message_id):
+                return
+
+            choices = game.get("rps_choices")
+            if not isinstance(choices, dict):
+                choices = {}
+            choices[str(uid)] = choice
+            game["rps_choices"] = choices
+            set_active_rr(chat_id, game)
+
+            if len(choices.keys()) < 2:
+                base = "한 명이 선택했습니다. 상대의 선택을 기다리는 중..."
+                await rr_set_message(context, game, base, reply_markup=game.get("last_reply_markup"), countdown=30)
+                set_active_rr(chat_id, game)
+                return
+
+            a_id = int(challenger_id)
+            b_id = int(opponent_id)
+            a_choice = str(choices.get(str(a_id)))
+            b_choice = str(choices.get(str(b_id)))
+            res = rps_result(a_choice, b_choice)
+            if res == 0:
+                game["rps_choices"] = {}
+                set_active_rr(chat_id, game)
+                base = "가위바위보가 비겼습니다. 다시 선택해주세요."
+                await rr_set_message(context, game, base, reply_markup=game.get("last_reply_markup"), countdown=30)
+                set_active_rr(chat_id, game)
+                return
+
+            winner_id = a_id if res == 1 else b_id
+            loser_id = b_id if winner_id == a_id else a_id
+            game["winner_id"] = winner_id
+            game["phase"] = "order"
+            set_active_rr(chat_id, game)
+
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            text="선공",
+                            callback_data=f"rr_order:{chat_id}:{winner_id}:{loser_id}:first",
+                        ),
+                        InlineKeyboardButton(
+                            text="후공",
+                            callback_data=f"rr_order:{chat_id}:{winner_id}:{loser_id}:second",
+                        ),
+                    ]
+                ]
+            )
+            wdisp = user_link(
+                winner_id,
+                str(
+                    game.get("challenger_display")
+                    if winner_id == int(game.get("challenger_id"))
+                    else game.get("opponent_display")
+                ),
+            )
+            base = (
+                f"가위바위보 결과 {wdisp} 님이 승리하였습니다.\n"
+                "승리한 유저가 선공하시겠습니까 후공하시겠습니까?"
+            )
+            await rr_set_message(context, game, base, reply_markup=kb, countdown=30)
+            set_active_rr(chat_id, game)
+            rr_start_action_timeout(context, game, [int(winner_id)])
+        return
+
+    if data.startswith("rr_order:"):
+        parts = data.split(":")
+        if len(parts) != 5:
+            return
+        _, cid, winner_id, loser_id, order = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(winner_id):
+            try:
+                await q.answer("승리자만 선택할 수 있습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+        if order not in ("first", "second"):
+            return
+
+        async with get_rr_chat_lock(chat_id):
+            game = get_active_rr(chat_id)
+            if game is None or game.get("phase") != "order":
+                return
+            if int(game.get("message_id")) != int(q.message.message_id):
+                return
+            if int(game.get("winner_id") or 0) != int(winner_id):
+                return
+
+            turn_id = int(winner_id) if order == "first" else int(loser_id)
+            game["turn_id"] = turn_id
+            game["phase"] = "pick"
+            set_active_rr(chat_id, game)
+
+            num_buttons = [
+                InlineKeyboardButton(
+                    text=str(i), callback_data=f"rr_pick:{chat_id}:{winner_id}:{loser_id}:{i}"
+                )
+                for i in range(1, 7)
+            ]
+            kb = InlineKeyboardMarkup([num_buttons[:3], num_buttons[3:]])
+            tdisp = user_link(
+                turn_id,
+                str(
+                    game.get("challenger_display")
+                    if turn_id == int(game.get("challenger_id"))
+                    else game.get("opponent_display")
+                ),
+            )
+            base = f"{'선공' if order == 'first' else '후공'}하셨습니다. {tdisp}님이 먼저 숫자를 골라주세요."
+            await rr_set_message(context, game, base, reply_markup=kb, countdown=30)
+            set_active_rr(chat_id, game)
+            rr_start_action_timeout(context, game, [int(turn_id)])
+        return
+
+    if data.startswith("rr_pick:"):
+        parts = data.split(":")
+        if len(parts) != 5:
+            return
+        _, cid, winner_id, loser_id, slot_s = parts
+        if int(cid) != chat_id:
+            return
+        try:
+            slot = int(slot_s)
+        except Exception:
+            return
+        if slot < 1 or slot > 6:
+            return
+
+        async with get_rr_chat_lock(chat_id):
+            game = get_active_rr(chat_id)
+            if game is None or game.get("phase") != "pick":
+                return
+            if int(game.get("message_id")) != int(q.message.message_id):
+                return
+
+            turn_id = int(game.get("turn_id") or 0)
+            if q.from_user is None or int(q.from_user.id) != turn_id:
+                try:
+                    await q.answer("지금 차례가 아닙니다.", show_alert=True)
+                except Exception:
+                    return
+                return
+
+            picked = list(game.get("picked_slots") or [])
+            if slot in picked:
+                try:
+                    await q.answer("이미 선택된 숫자입니다.", show_alert=True)
+                except Exception:
+                    return
+                return
+            picked.append(slot)
+            game["picked_slots"] = picked
+
+            c_id = int(game.get("challenger_id"))
+            o_id = int(game.get("opponent_id"))
+            other_id = o_id if turn_id == c_id else c_id
+            tdisp = user_link(
+                turn_id,
+                str(game.get("challenger_display") if turn_id == c_id else game.get("opponent_display")),
+            )
+            odisp = user_link(
+                other_id,
+                str(game.get("challenger_display") if other_id == c_id else game.get("opponent_display")),
+            )
+
+            if slot == int(game.get("bullet_slot")):
+                survivor_id = other_id
+                pot = int(game.get("pot") or 0)
+                db = get_firebase_client()
+                dt = now_kst()
+                lock1, lock2 = await acquire_two_user_locks(chat_id, c_id, o_id)
+                try:
+                    sref = user_ref(db, chat_id, survivor_id)
+                    ssnap = sref.get()
+                    sudata = ssnap.to_dict() if ssnap.exists else {}
+                    s_bal = int(sudata.get("total_exp", 0)) + pot
+                    sref.set({"total_exp": s_bal, "last_seen": dt}, merge=True)
+                finally:
+                    release_two_user_locks(lock1, lock2)
+
+                rr_cancel_jobs(context, game)
+                set_active_rr(chat_id, None)
+                sdisp = user_link(
+                    survivor_id,
+                    str(game.get("challenger_display") if survivor_id == c_id else game.get("opponent_display")),
+                )
+                try:
+                    await q.message.edit_text(
+                        f"{tdisp}님이 {slot}번을 고르셨습니다. 딸깍 드르르륵~\n"
+                        "총알을 발사합니다.\n"
+                        f"탕~ {tdisp}님은 총알을 맞고 사망하셨습니다. {sdisp}님은 전리품으로 {pot}$WHAT을 획득하셨습니다.",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+                return
+
+            game["turn_id"] = other_id
+            set_active_rr(chat_id, game)
+
+            remaining = [i for i in range(1, 7) if i not in picked]
+            num_buttons = [
+                InlineKeyboardButton(
+                    text=str(i), callback_data=f"rr_pick:{chat_id}:{winner_id}:{loser_id}:{i}"
+                )
+                for i in remaining
+            ]
+            rows: List[List[InlineKeyboardButton]] = []
+            while num_buttons:
+                rows.append(num_buttons[:3])
+                num_buttons = num_buttons[3:]
+            kb = InlineKeyboardMarkup(rows) if rows else None
+
+            base = (
+                f"{tdisp}님이 {slot}번을 고르셨습니다. 딸깍 드르르륵~\n"
+                "총알을 발사합니다.\n"
+                f"틱. {tdisp}님은 생존하셨습니다.\n\n"
+                f"{odisp}님이 숫자를 골라주세요."
+            )
+            await rr_set_message(context, game, base, reply_markup=kb, countdown=30)
+            set_active_rr(chat_id, game)
+            rr_start_action_timeout(context, game, [int(other_id)])
         return
 
     if data.startswith("yacha_accept:"):
@@ -3509,7 +4782,9 @@ def main() -> None:
  
     kst = ZoneInfo(KST_TZ)
     application.job_queue.run_once(treasure_startup_ensure_job, when=0)
+    application.job_queue.run_once(fish_market_daily_job, when=0)
     application.job_queue.run_daily(treasure_daily_add_job, time=time(0, 0, tzinfo=kst))
+    application.job_queue.run_daily(fish_market_daily_job, time=time(0, 0, tzinfo=kst))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
