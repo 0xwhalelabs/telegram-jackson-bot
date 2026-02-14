@@ -52,6 +52,7 @@ _CHAT_LOCKS: Dict[int, asyncio.Lock] = {}
 
 
 _FISHING_SESSIONS: Dict[Tuple[int, int], bool] = {}
+_FISHING_PENDING: Dict[Tuple[int, int], bool] = {}
 
 
 def get_chat_lock(chat_id: int) -> asyncio.Lock:
@@ -559,6 +560,18 @@ FISHING_RARE_FISH: List[str] = [
 FISHING_SATOSHI_NOTE = "사토시의 비밀노트"
 
 
+FISHING_WAIT_MESSAGES: List[str] = [
+    "찌가 꿈틀대는 느낌이 듭니다...",
+    "수면 위로 수상한 물결이 일렁입니다.",
+    "옆 사람 낚싯줄과 얽힐 뻔했습니다.",
+    "바닷바람이 쎄게 붑니다.",
+    "미끼가 뭔가에 뜯긴 것 같습니다.",
+    "갑자기 고래가 지나간 것 같습니다.",
+    "낚싯대를 꽉 잡으세요!",
+    "어딘가에서 '펌프잇'이 들려옵니다.",
+]
+
+
 def fishing_daily_limit(tool_level: int) -> int:
     lvl = max(0, int(tool_level))
     return 10 + (lvl * 2)
@@ -578,6 +591,114 @@ def set_fishing_active(chat_id: int, user_id: int, active: bool) -> None:
         _FISHING_SESSIONS.pop(key, None)
         return
     _FISHING_SESSIONS[key] = True
+
+
+def _get_fishing_pending_key(chat_id: int, user_id: int) -> Tuple[int, int]:
+    return int(chat_id), int(user_id)
+
+
+def is_fishing_pending(chat_id: int, user_id: int) -> bool:
+    return bool(_FISHING_PENDING.get(_get_fishing_pending_key(chat_id, user_id)))
+
+
+def set_fishing_pending(chat_id: int, user_id: int, pending: bool) -> None:
+    key = _get_fishing_pending_key(chat_id, user_id)
+    if not pending:
+        _FISHING_PENDING.pop(key, None)
+        return
+    _FISHING_PENDING[key] = True
+
+
+def fish_cast_job_name(chat_id: int, user_id: int, message_id: int) -> str:
+    return f"fish_cast_delay:{int(chat_id)}:{int(user_id)}:{int(message_id)}"
+
+
+def fish_cancel_jobs(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, message_id: int) -> None:
+    try:
+        for j in context.job_queue.get_jobs_by_name(fish_cast_job_name(int(chat_id), int(user_id), int(message_id))):
+            j.schedule_removal()
+    except Exception:
+        pass
+
+
+def _fishing_kb(chat_id: int, user_id: int, message_id: int, can_continue: bool) -> InlineKeyboardMarkup:
+    row: List[InlineKeyboardButton] = []
+    if can_continue:
+        row.append(
+            InlineKeyboardButton(
+                text="계속하기",
+                callback_data=f"fish_cast:{int(chat_id)}:{int(user_id)}:{int(message_id)}",
+            )
+        )
+    row.append(
+        InlineKeyboardButton(
+            text="끝내기",
+            callback_data=f"fish_end:{int(chat_id)}:{int(user_id)}:{int(message_id)}",
+        )
+    )
+    return InlineKeyboardMarkup([row])
+
+
+async def fish_cast_delayed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data if context.job else None
+    if not isinstance(data, dict):
+        return
+    chat_id = int(data.get("chat_id") or 0)
+    user_id = int(data.get("user_id") or 0)
+    message_id = int(data.get("message_id") or 0)
+    username = data.get("username")
+    display = str(data.get("display") or str(user_id))
+    if chat_id <= 0 or user_id <= 0 or message_id <= 0:
+        return
+
+    if not is_fishing_active(chat_id, user_id):
+        set_fishing_pending(chat_id, user_id, False)
+        return
+
+    db = get_firebase_client()
+    dt = now_kst()
+    res = await _do_fishing_cast(db, chat_id, user_id, username, display, dt)
+    if not bool(res.get("ok")):
+        set_fishing_active(chat_id, user_id, False)
+        set_fishing_pending(chat_id, user_id, False)
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=str(res.get("msg") or "낚시에 실패했습니다."),
+            )
+        except Exception:
+            pass
+        return
+
+    remaining = int(res.get("remaining") or 0)
+    limit = int(res.get("limit") or 0)
+    loot_name = str(res.get("loot_name") or "")
+    loot_value = int(res.get("loot_value") or 0)
+    price_line = str(res.get("price_line") or "").strip()
+
+    can_continue = remaining > 0
+    if not can_continue:
+        set_fishing_active(chat_id, user_id, False)
+
+    set_fishing_pending(chat_id, user_id, False)
+
+    text = (
+        f"{display} 낚시!\n"
+        f"획득: {loot_name}\n"
+        f"가치: {loot_value}$WHAT\n"
+        + (price_line + "\n" if price_line else "")
+        + f"남은 횟수: {remaining}/{limit}"
+    )
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=_fishing_kb(chat_id, user_id, message_id, can_continue=can_continue),
+        )
+    except Exception:
+        pass
 
 
 def _coerce_int_dict(value: Any) -> Dict[str, int]:
@@ -626,6 +747,122 @@ async def _ensure_daily_fish_prices(
         )
 
         return prices2
+
+
+async def _do_fishing_cast(
+    db: firestore.Client,
+    chat_id: int,
+    user_id: int,
+    username: Optional[str],
+    display: str,
+    dt: datetime,
+) -> Dict[str, Any]:
+    today = kst_date_str(dt)
+    async with get_user_lock(int(chat_id), int(user_id)):
+        uref = user_ref(db, int(chat_id), int(user_id))
+        snap = uref.get()
+        udata = snap.to_dict() if snap.exists else {}
+
+        sword_lvl, _ = sword_state_from_udata(udata)
+        rod_lvl = udata.get("fishing_rod_level")
+        if rod_lvl is None:
+            return {
+                "ok": False,
+                "msg": f"{display} 낚시는 낚싯대가 있어야 가능합니다.\n!오른 에서 검→낚싯대 교환을 먼저 해주세요.",
+            }
+
+        tool_lvl = int(rod_lvl)
+        if tool_lvl < 0:
+            tool_lvl = 0
+
+        limit = fishing_daily_limit(tool_lvl)
+        uses_date = udata.get("fishing_uses_date")
+        uses_today = int(udata.get("fishing_uses_today", 0))
+        if uses_date != today:
+            uses_today = 0
+            uses_date = today
+        remaining = max(0, limit - uses_today)
+        if remaining <= 0:
+            return {
+                "ok": False,
+                "msg": f"{display}님 오늘 낚시 가능 횟수를 모두 사용했습니다. (하루 {limit}회)",
+                "limit": limit,
+                "remaining": 0,
+            }
+
+        prices = await _ensure_daily_fish_prices(db, int(chat_id), dt)
+        fish_inv = _coerce_int_dict(udata.get("fish_inventory"))
+        note_cnt = int(udata.get("satoshi_note", 0))
+        tickets_list, _ = defense_tickets_list_from_udata(udata, dt)
+
+        weights = [80.0, 40.0, 20.0, 1.0, 0.05]
+        pick = random.random() * sum(weights)
+        cat = "trash"
+        acc = 0.0
+        for name, w in zip(["trash", "common", "rare", "ticket", "note"], weights):
+            acc += float(w)
+            if pick <= acc:
+                cat = name
+                break
+
+        loot_name = ""
+        loot_value = 0
+        if cat == "trash":
+            loot_name = random.choice(FISHING_TRASH_ITEMS)
+            loot_value = 0
+        elif cat == "common":
+            loot_name = random.choice(FISHING_COMMON_FISH)
+            fish_inv[loot_name] = int(fish_inv.get(loot_name, 0)) + 1
+            loot_value = int(prices.get(loot_name, 0))
+        elif cat == "rare":
+            loot_name = random.choice(FISHING_RARE_FISH)
+            fish_inv[loot_name] = int(fish_inv.get(loot_name, 0)) + 1
+            loot_value = int(prices.get(loot_name, 0))
+        elif cat == "ticket":
+            loot_name = "강화 방어권"
+            tickets_list.append(dt + timedelta(seconds=DEFENSE_TICKET_TTL_SECONDS))
+            loot_value = random.randint(5000, 8000)
+        else:
+            loot_name = FISHING_SATOSHI_NOTE
+            note_cnt += 1
+            loot_value = 100_000
+
+        uses_today += 1
+        remaining_after = max(0, limit - uses_today)
+
+        uref.set(
+            {
+                "user_id": int(user_id),
+                "username": username or None,
+                "display": display,
+                "fish_inventory": fish_inv,
+                "satoshi_note": int(note_cnt),
+                "defense_tickets_list": tickets_list,
+                "defense_tickets": len(tickets_list),
+                "fishing_uses_date": uses_date,
+                "fishing_uses_today": uses_today,
+                "last_seen": dt,
+                "last_active_date": today,
+            },
+            merge=True,
+        )
+
+    price_line = ""
+    if loot_name in prices:
+        price_line = f"오늘 시세: {int(prices.get(loot_name, 0))}$WHAT"
+    elif loot_name == FISHING_SATOSHI_NOTE:
+        price_line = "오늘 시세: 100000$WHAT"
+
+    return {
+        "ok": True,
+        "loot_name": loot_name,
+        "loot_value": int(loot_value),
+        "price_line": price_line,
+        "remaining": int(remaining_after),
+        "limit": int(limit),
+        "rod_level": int(rod_lvl),
+        "sword_level": int(sword_lvl),
+    }
 
 
 async def fish_market_daily_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1958,22 +2195,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             fish_inv = _coerce_int_dict(udata.get("fish_inventory"))
             note_cnt = int(udata.get("satoshi_note", 0))
 
+            prices = await _ensure_daily_fish_prices(db, chat_id, dt)
+
             if rod_lvl is not None and lvl == SWORD_NONE_LEVEL:
+                rod_sell_price = sword_sell_price(int(rod_lvl))
+                rod_sell_txt = "판매 불가" if rod_sell_price is None else f"{int(rod_sell_price)}$WHAT"
                 lines = [
                     f"{display}님 현재 낚싯대 [{sword_name(int(rod_lvl))}]를 보유 중입니다.",
+                    "- 판매: 불가 (낚싯대→검으로 교환 후 판매 가능)",
+                    f"- 전환 시 검 판매가: {rod_sell_txt}",
                     f"강화 방어티켓: {tickets}장",
                 ]
             elif lvl == SWORD_NONE_LEVEL:
                 lines = [f"{display}님 현재 검이 없습니다.", f"강화 방어티켓: {tickets}장"]
             else:
+                sell_price = sword_sell_price(lvl)
+                sell_txt = "판매 불가" if sell_price is None else f"{int(sell_price)}$WHAT"
                 lines = [
                     f"{display}님 현재소유 검 [{sword_name(lvl)}]이 있습니다.",
+                    f"- 판매가: {sell_txt}",
                     f"강화 방어티켓: {tickets}장",
                 ]
 
-            fish_cnt = sum(int(v) for v in fish_inv.values())
-            if fish_cnt > 0 or note_cnt > 0:
-                lines.append(f"물고기 보유: {fish_cnt}마리 / 비밀노트: {note_cnt}개")
+            fish_total = 0
+            fish_lines: List[str] = []
+            for name, cnt in sorted(fish_inv.items()):
+                if int(cnt) <= 0:
+                    continue
+                p = int(prices.get(name, 0))
+                subtotal = p * int(cnt)
+                fish_total += subtotal
+                fish_lines.append(f"- {name} x{int(cnt)} (개당 {p}$WHAT / {subtotal}$WHAT)")
+            if note_cnt > 0:
+                subtotal = 100_000 * int(note_cnt)
+                fish_total += subtotal
+                fish_lines.append(f"- {FISHING_SATOSHI_NOTE} x{int(note_cnt)} (개당 100000$WHAT / {subtotal}$WHAT)")
+
+            if fish_lines:
+                lines.append("\n[물고기 인벤토리(오늘 시세)]")
+                lines.extend(fish_lines)
+                lines.append(f"- 총액(예상): {int(fish_total)}$WHAT")
 
             for i, exp_at in enumerate(tickets_list, start=1):
                 remain = int((exp_at - dt).total_seconds())
@@ -1997,113 +2258,69 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if text.strip() == "!낚시끝":
             set_fishing_active(chat_id, user_id, False)
+            set_fishing_pending(chat_id, user_id, False)
             await update.message.reply_text(f"{display} 낚시를 종료했습니다.")
             return
 
+        db = get_firebase_client()
+        dt = now_kst()
         async with get_user_lock(chat_id, user_id):
-            db = get_firebase_client()
-            dt = now_kst()
-            today = kst_date_str(dt)
-
             uref = user_ref(db, chat_id, user_id)
             snap = uref.get()
             udata = snap.to_dict() if snap.exists else {}
-
-            sword_lvl, _ = sword_state_from_udata(udata)
             rod_lvl = udata.get("fishing_rod_level")
-            tool_lvl = int(rod_lvl) if rod_lvl is not None else int(sword_lvl if sword_lvl != SWORD_NONE_LEVEL else 0)
-            if tool_lvl < 0:
-                tool_lvl = 0
-
-            if sword_lvl == SWORD_NONE_LEVEL and rod_lvl is None:
-                await update.message.reply_text(f"{display}님은 낚시할 장비가 없습니다. (검 또는 낚싯대 필요)")
+            if rod_lvl is None:
+                await update.message.reply_text(
+                    f"{display} 낚시는 낚싯대가 있어야 가능합니다.\n"
+                    "!오른 에서 검→낚싯대 교환을 먼저 해주세요."
+                )
                 return
-
+            tool_lvl = int(rod_lvl)
             limit = fishing_daily_limit(tool_lvl)
             uses_date = udata.get("fishing_uses_date")
             uses_today = int(udata.get("fishing_uses_today", 0))
+            today = kst_date_str(dt)
             if uses_date != today:
                 uses_today = 0
                 uses_date = today
-
             remaining = max(0, limit - uses_today)
-            if remaining <= 0:
-                await update.message.reply_text(f"{display}님 오늘 낚시 가능 횟수를 모두 사용했습니다. (하루 {limit}회)")
-                return
 
-            set_fishing_active(chat_id, user_id, True)
+        if remaining <= 0:
+            await update.message.reply_text(f"{display}님 오늘 낚시 가능 횟수를 모두 사용했습니다. (하루 {limit}회)")
+            return
 
-            prices = await _ensure_daily_fish_prices(db, chat_id, dt)
-            fish_inv = _coerce_int_dict(udata.get("fish_inventory"))
-            note_cnt = int(udata.get("satoshi_note", 0))
-            tickets_list, t_changed = defense_tickets_list_from_udata(udata, dt)
-
-            weights = [80.0, 40.0, 20.0, 1.0, 0.05]
-            pick = random.random() * sum(weights)
-            cat = "trash"
-            acc = 0.0
-            for name, w in zip(["trash", "common", "rare", "ticket", "note"], weights):
-                acc += float(w)
-                if pick <= acc:
-                    cat = name
-                    break
-
-            loot_name = ""
-            loot_value = 0
-            if cat == "trash":
-                loot_name = random.choice(FISHING_TRASH_ITEMS)
-                loot_value = 0
-            elif cat == "common":
-                loot_name = random.choice(FISHING_COMMON_FISH)
-                fish_inv[loot_name] = int(fish_inv.get(loot_name, 0)) + 1
-                loot_value = int(prices.get(loot_name, 0))
-            elif cat == "rare":
-                loot_name = random.choice(FISHING_RARE_FISH)
-                fish_inv[loot_name] = int(fish_inv.get(loot_name, 0)) + 1
-                loot_value = int(prices.get(loot_name, 0))
-            elif cat == "ticket":
-                loot_name = "강화 방어권"
-                tickets_list.append(dt + timedelta(seconds=DEFENSE_TICKET_TTL_SECONDS))
-                loot_value = random.randint(5000, 8000)
-            else:
-                loot_name = FISHING_SATOSHI_NOTE
-                note_cnt += 1
-                loot_value = 100_000
-
-            uses_today += 1
-            remaining_after = max(0, limit - uses_today)
-
-            uref.set(
-                {
-                    "user_id": user_id,
-                    "username": username or None,
-                    "display": display,
-                    "fish_inventory": fish_inv,
-                    "satoshi_note": note_cnt,
-                    "defense_tickets_list": tickets_list,
-                    "defense_tickets": len(tickets_list),
-                    "fishing_uses_date": uses_date,
-                    "fishing_uses_today": uses_today,
-                    "last_seen": dt,
-                    "last_active_date": today,
-                },
-                merge=True,
-            )
-
-        price_line = ""
-        if loot_name in prices:
-            price_line = f"오늘 시세: {int(prices.get(loot_name, 0))}$WHAT"
-        elif loot_name == FISHING_SATOSHI_NOTE:
-            price_line = "오늘 시세: 100000$WHAT"
-
-        await update.message.reply_text(
-            f"{display} 낚시!\n"
-            f"획득: {loot_name}\n"
-            f"가치: {loot_value}$WHAT\n"
-            + (price_line + "\n" if price_line else "")
-            + f"남은 횟수: {remaining_after}/{limit}\n"
-            "종료: !낚시끝"
+        set_fishing_active(chat_id, user_id, True)
+        msg0 = await update.message.reply_text(
+            f"{display} 낚시를 시작합니다.\n남은 횟수: {int(remaining)}/{int(limit)}\n\n"
+            "아래 버튼으로 계속 낚시하거나 종료할 수 있습니다."
         )
+
+        set_fishing_pending(chat_id, user_id, True)
+        wait_s = random.randint(5, 20)
+        wait_txt = random.choice(FISHING_WAIT_MESSAGES) if FISHING_WAIT_MESSAGES else "..."
+        try:
+            await msg0.edit_text(
+                f"{display} 낚시중...\n{wait_txt}",
+                reply_markup=_fishing_kb(chat_id, user_id, int(msg0.message_id), can_continue=False),
+            )
+        except Exception:
+            pass
+
+        try:
+            context.job_queue.run_once(
+                fish_cast_delayed_job,
+                when=int(wait_s),
+                name=fish_cast_job_name(chat_id, user_id, int(msg0.message_id)),
+                data={
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "message_id": int(msg0.message_id),
+                    "username": username,
+                    "display": display,
+                },
+            )
+        except Exception:
+            set_fishing_pending(chat_id, user_id, False)
         return
 
     if text.strip() == "!강화확률":
@@ -3281,6 +3498,89 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.chat_data["bounty_mode"] = {"scope": "all", "step": "await_amount"}
         try:
             await q.message.edit_text("모든 유저에게 지급할 금액을 입력해주세요. (숫자)")
+        except Exception:
+            pass
+        return
+
+    if data.startswith("fish_cast:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, uid, mid = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("본인만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+        if q.message is None or int(q.message.message_id) != int(mid):
+            return
+
+        user_id = int(uid)
+        if is_fishing_pending(chat_id, user_id):
+            try:
+                await q.answer("지금 낚시중입니다...", show_alert=True)
+            except Exception:
+                return
+            return
+        if not is_fishing_active(chat_id, user_id):
+            try:
+                await q.answer("낚시가 종료되었습니다. 다시 !낚시로 시작하세요.", show_alert=True)
+            except Exception:
+                return
+            return
+
+        username = q.from_user.username if q.from_user else None
+        display = f"@{username}" if username else ((q.from_user.full_name if q.from_user else "") or str(user_id))
+
+        set_fishing_pending(chat_id, user_id, True)
+        wait_s = random.randint(5, 20)
+        wait_txt = random.choice(FISHING_WAIT_MESSAGES) if FISHING_WAIT_MESSAGES else "..."
+        try:
+            await q.message.edit_text(
+                f"{display} 낚시중...\n{wait_txt}",
+                reply_markup=_fishing_kb(chat_id, user_id, int(mid), can_continue=False),
+            )
+        except Exception:
+            pass
+
+        try:
+            context.job_queue.run_once(
+                fish_cast_delayed_job,
+                when=int(wait_s),
+                name=fish_cast_job_name(chat_id, user_id, int(mid)),
+                data={
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "message_id": int(mid),
+                    "username": username,
+                    "display": display,
+                },
+            )
+        except Exception:
+            set_fishing_pending(chat_id, user_id, False)
+        return
+
+    if data.startswith("fish_end:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, uid, mid = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            return
+        if q.message is None or int(q.message.message_id) != int(mid):
+            return
+
+        user_id = int(uid)
+        fish_cancel_jobs(context, chat_id, user_id, int(mid))
+        set_fishing_active(chat_id, user_id, False)
+        set_fishing_pending(chat_id, user_id, False)
+        try:
+            await q.message.edit_text("낚시를 종료했습니다.")
         except Exception:
             pass
         return
