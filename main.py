@@ -369,8 +369,21 @@ async def rr_set_message(
         )
         game["message_id"] = int(sent.message_id)
         set_active_rr(chat_id, game)
-    except Exception:
-        return
+    except Exception as _sm_err:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] rr_set_msg fail: {type(_sm_err).__name__}: {_sm_err}")
+        except Exception:
+            pass
+        try:
+            sent2 = await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+            game["message_id"] = int(sent2.message_id)
+            set_active_rr(chat_id, game)
+        except Exception:
+            return
 
 
 def rr_start_invite_timeout(context: ContextTypes.DEFAULT_TYPE, game: Dict[str, Any]) -> None:
