@@ -1320,7 +1320,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"보물힌트 횟수 초기화 완료 (대상 {cnt}명)")
         return
 
-    if text.strip() == "!보물힌트":
+    if text.strip() in ("!보물힌트", "!ㅎㅌ"):
         user_id = int(update.effective_user.id)
         dt = now_kst()
         today = kst_date_str(dt)
@@ -1497,7 +1497,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "\n"
             "[보물]\n"
             "- !남은보물: 남은 보물 개수 확인\n"
-            "- !보물힌트: 남은 보물 중 랜덤 힌트\n"
+            "- !보물힌트 (또는 !ㅎㅌ): 남은 보물 중 랜덤 힌트\n"
             "\n"
             "[검 키우기]\n"
             "- !인벤토리: 현재 검/방어티켓 확인\n"
