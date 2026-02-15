@@ -309,7 +309,7 @@ def rr_cancel_jobs(context: ContextTypes.DEFAULT_TYPE, game: Dict[str, Any]) -> 
     except Exception:
         return
 
-    if chat_id <= 0 or message_id <= 0:
+    if chat_id == 0 or message_id == 0:
         return
     try:
         for j in context.job_queue.get_jobs_by_name(rr_invite_job_name(chat_id, message_id)):
@@ -333,7 +333,7 @@ async def rr_set_message(
 ) -> None:
     chat_id = int(game.get("chat_id") or 0)
     message_id = int(game.get("message_id") or 0)
-    if chat_id <= 0:
+    if chat_id == 0:
         return
 
     game["status_text"] = base_text
@@ -369,11 +369,7 @@ async def rr_set_message(
         )
         game["message_id"] = int(sent.message_id)
         set_active_rr(chat_id, game)
-    except Exception as _sm_err:
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] rr_set_msg fail: {type(_sm_err).__name__}: {_sm_err}")
-        except Exception:
-            pass
+    except Exception:
         try:
             sent2 = await context.bot.send_message(
                 chat_id=chat_id,
@@ -390,7 +386,7 @@ def rr_start_invite_timeout(context: ContextTypes.DEFAULT_TYPE, game: Dict[str, 
     rr_cancel_jobs(context, game)
     chat_id = int(game.get("chat_id") or 0)
     message_id = int(game.get("message_id") or 0)
-    if chat_id <= 0 or message_id <= 0:
+    if chat_id == 0 or message_id == 0:
         return
     context.job_queue.run_once(
         rr_invite_timeout_job,
@@ -406,7 +402,7 @@ def rr_start_action_timeout(
     rr_cancel_jobs(context, game)
     chat_id = int(game.get("chat_id") or 0)
     message_id = int(game.get("message_id") or 0)
-    if chat_id <= 0 or message_id <= 0:
+    if chat_id == 0 or message_id == 0:
         return
     game["required_user_ids"] = [int(x) for x in required_user_ids]
     game["countdown_until"] = now_kst() + timedelta(seconds=30)
@@ -423,7 +419,7 @@ async def rr_invite_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data or {}
     chat_id = int(data.get("chat_id") or 0)
     message_id = int(data.get("message_id") or 0)
-    if chat_id <= 0 or message_id <= 0:
+    if chat_id == 0 or message_id == 0:
         return
 
     async with get_rr_chat_lock(chat_id):
@@ -449,7 +445,7 @@ async def rr_invite_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def rr_action_tick_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data or {}
     chat_id = int(data.get("chat_id") or 0)
-    if chat_id <= 0:
+    if chat_id == 0:
         return
 
     game = get_active_rr(chat_id)
@@ -3858,16 +3854,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if int(cid) != chat_id:
             return
 
-        # DEBUG: send trace to chat
-        _dbg_parts = f"from={q.from_user.id if q.from_user else None} opp={opponent_id} dec={decision}"
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] rr_invite: {_dbg_parts}")
-        except Exception:
-            pass
-
         if q.from_user is None or int(q.from_user.id) != int(opponent_id):
             try:
-                await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] wrong user: from={q.from_user.id if q.from_user else None} != opp={opponent_id}")
+                await context.bot.send_message(chat_id=chat_id, text="상대만 누를 수 있습니다.")
             except Exception:
                 pass
             return
@@ -3876,10 +3865,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         try:
             game = get_active_rr(chat_id)
-            try:
-                await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] game phase={game.get('phase') if game else 'None'}, game_opp={game.get('opponent_id') if game else 'N/A'}")
-            except Exception:
-                pass
             if game is None:
                 await context.bot.send_message(chat_id=chat_id, text="유효하지 않은 초대입니다.")
                 return
@@ -3902,41 +3887,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             rr_cancel_jobs(context, game)
 
-            try:
-                await context.bot.send_message(chat_id=chat_id, text="[DEBUG] step1: cancel_jobs done, starting firestore")
-            except Exception:
-                pass
-
-            try:
-                db = get_firebase_client()
-                dt = now_kst()
-                uref = user_ref(db, chat_id, int(opponent_id))
-                snap = uref.get()
-                udata = snap.to_dict() if snap.exists else {}
-                bal = int(udata.get("total_exp", 0))
-
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] step2: firestore done, bal={bal}")
-                except Exception:
-                    pass
-
-                if bal < 300:
-                    set_active_rr(chat_id, None)
-                    await context.bot.send_message(chat_id=chat_id, text="잔고가 부족하여 수락할 수 없습니다. (필요 300$WHAT)")
-                    return
-                uref.set({"total_exp": bal - 300, "last_seen": dt}, merge=True)
-            except Exception as _fs_err:
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] firestore error: {type(_fs_err).__name__}: {_fs_err}")
-                except Exception:
-                    pass
+            db = get_firebase_client()
+            dt = now_kst()
+            uref = user_ref(db, chat_id, int(opponent_id))
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            bal = int(udata.get("total_exp", 0))
+            if bal < 300:
                 set_active_rr(chat_id, None)
+                await context.bot.send_message(chat_id=chat_id, text="잔고가 부족하여 수락할 수 없습니다. (필요 300$WHAT)")
                 return
-
-            try:
-                await context.bot.send_message(chat_id=chat_id, text="[DEBUG] step3: balance deducted, building RPS")
-            except Exception:
-                pass
+            uref.set({"total_exp": bal - 300, "last_seen": dt}, merge=True)
 
             game["accepted"] = True
             game["pot"] = 300
@@ -3970,23 +3931,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"{cdisp}과 {odisp}는 가위 바위 보 중 하나를 골라주세요."
             )
 
-            try:
-                await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] step4: calling rr_set_message")
-            except Exception:
-                pass
-
             await rr_set_message(context, game, base, reply_markup=kb, countdown=30)
             set_active_rr(chat_id, game)
             rr_start_action_timeout(context, game, [int(challenger_id), int(opponent_id)])
-        except Exception as _rr_err:
-            import traceback as _tb
-            _err_text = f"[DEBUG] rr_invite error: {type(_rr_err).__name__}: {_rr_err}\n{_tb.format_exc()[-500:]}"
+        except Exception:
             try:
                 set_active_rr(chat_id, None)
             except Exception:
                 pass
             try:
-                await context.bot.send_message(chat_id=chat_id, text=_err_text)
+                await context.bot.send_message(chat_id=chat_id, text="러시안룰렛 처리 중 오류가 발생했습니다.")
             except Exception:
                 pass
         return
