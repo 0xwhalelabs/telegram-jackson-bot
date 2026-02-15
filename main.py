@@ -354,7 +354,17 @@ async def rr_set_message(
             reply_markup=reply_markup,
         )
     except Exception:
-        return
+        try:
+            sent = await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+            game["message_id"] = int(sent.message_id)
+            set_active_rr(chat_id, game)
+        except Exception:
+            return
 
 
 def rr_start_invite_timeout(context: ContextTypes.DEFAULT_TYPE, game: Dict[str, Any]) -> None:
@@ -2318,37 +2328,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         set_fishing_active(chat_id, user_id, True)
-        msg0 = await update.message.reply_text(
-            f"{display} 낚시를 시작합니다.\n남은 횟수: {int(remaining)}/{int(limit)}\n\n"
-            "아래 버튼으로 계속 낚시하거나 종료할 수 있습니다."
-        )
+        set_fishing_pending(chat_id, user_id, False)
 
-        set_fishing_pending(chat_id, user_id, True)
-        wait_s = random.randint(5, 20)
-        wait_txt = random.choice(FISHING_WAIT_MESSAGES) if FISHING_WAIT_MESSAGES else "..."
+        msg0 = await update.message.reply_text(f"{display} 낚시중...")
+        fish_cancel_jobs(context, chat_id, user_id, int(msg0.message_id))
+
+        res = await _do_fishing_cast(db, chat_id, user_id, username, display, dt)
+        if not bool(res.get("ok")):
+            set_fishing_active(chat_id, user_id, False)
+            try:
+                await msg0.edit_text(str(res.get("msg") or "낚시에 실패했습니다."))
+            except Exception:
+                pass
+            return
+
+        remaining2 = int(res.get("remaining") or 0)
+        limit2 = int(res.get("limit") or 0)
+        loot_name = str(res.get("loot_name") or "")
+        loot_value = int(res.get("loot_value") or 0)
+        price_line = str(res.get("price_line") or "").strip()
+
+        can_continue = remaining2 > 0
+        if not can_continue:
+            set_fishing_active(chat_id, user_id, False)
+
+        text2 = (
+            f"{display} 낚시!\n"
+            f"획득: {loot_name}\n"
+            f"가치: {loot_value}$WHAT\n"
+            + (price_line + "\n" if price_line else "")
+            + f"남은 횟수: {remaining2}/{limit2}"
+        )
         try:
             await msg0.edit_text(
-                f"{display} 낚시중...\n{wait_txt}",
-                reply_markup=_fishing_kb(chat_id, user_id, int(msg0.message_id), can_continue=False),
+                text2,
+                reply_markup=_fishing_kb(chat_id, user_id, int(msg0.message_id), can_continue=can_continue),
             )
         except Exception:
             pass
-
-        try:
-            context.job_queue.run_once(
-                fish_cast_delayed_job,
-                when=int(wait_s),
-                name=fish_cast_job_name(chat_id, user_id, int(msg0.message_id)),
-                data={
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                    "message_id": int(msg0.message_id),
-                    "username": username,
-                    "display": display,
-                },
-            )
-        except Exception:
-            set_fishing_pending(chat_id, user_id, False)
         return
 
     if text.strip() == "!강화확률":
@@ -3547,12 +3564,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         user_id = int(uid)
-        if is_fishing_pending(chat_id, user_id):
-            try:
-                await q.answer("지금 낚시중입니다...", show_alert=True)
-            except Exception:
-                return
-            return
         if not is_fishing_active(chat_id, user_id):
             try:
                 await q.answer("낚시가 종료되었습니다. 다시 !낚시로 시작하세요.", show_alert=True)
@@ -3563,32 +3574,44 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         username = q.from_user.username if q.from_user else None
         display = f"@{username}" if username else ((q.from_user.full_name if q.from_user else "") or str(user_id))
 
-        set_fishing_pending(chat_id, user_id, True)
-        wait_s = random.randint(5, 20)
-        wait_txt = random.choice(FISHING_WAIT_MESSAGES) if FISHING_WAIT_MESSAGES else "..."
+        set_fishing_pending(chat_id, user_id, False)
+        fish_cancel_jobs(context, chat_id, user_id, int(mid))
+
+        db = get_firebase_client()
+        dt = now_kst()
+        res = await _do_fishing_cast(db, chat_id, user_id, username, display, dt)
+        if not bool(res.get("ok")):
+            set_fishing_active(chat_id, user_id, False)
+            try:
+                await q.message.edit_text(str(res.get("msg") or "낚시에 실패했습니다."))
+            except Exception:
+                pass
+            return
+
+        remaining = int(res.get("remaining") or 0)
+        limit = int(res.get("limit") or 0)
+        loot_name = str(res.get("loot_name") or "")
+        loot_value = int(res.get("loot_value") or 0)
+        price_line = str(res.get("price_line") or "").strip()
+
+        can_continue = remaining > 0
+        if not can_continue:
+            set_fishing_active(chat_id, user_id, False)
+
+        text = (
+            f"{display} 낚시!\n"
+            f"획득: {loot_name}\n"
+            f"가치: {loot_value}$WHAT\n"
+            + (price_line + "\n" if price_line else "")
+            + f"남은 횟수: {remaining}/{limit}"
+        )
         try:
             await q.message.edit_text(
-                f"{display} 낚시중...\n{wait_txt}",
-                reply_markup=_fishing_kb(chat_id, user_id, int(mid), can_continue=False),
+                text,
+                reply_markup=_fishing_kb(chat_id, user_id, int(mid), can_continue=can_continue),
             )
         except Exception:
             pass
-
-        try:
-            context.job_queue.run_once(
-                fish_cast_delayed_job,
-                when=int(wait_s),
-                name=fish_cast_job_name(chat_id, user_id, int(mid)),
-                data={
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                    "message_id": int(mid),
-                    "username": username,
-                    "display": display,
-                },
-            )
-        except Exception:
-            set_fishing_pending(chat_id, user_id, False)
         return
 
     if data.startswith("fish_end:"):
@@ -3790,19 +3813,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if int(cid) != chat_id:
             return
         if q.from_user is None or int(q.from_user.id) != int(opponent_id):
+            msg = "상대만 누를 수 있습니다."
             try:
-                await q.answer("상대만 누를 수 있습니다.", show_alert=True)
+                await q.answer(msg, show_alert=True)
             except Exception:
-                return
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=msg)
+                except Exception:
+                    pass
             return
 
         async with get_rr_chat_lock(chat_id):
             game = get_active_rr(chat_id)
             if game is None:
+                msg = "유효하지 않은 초대입니다."
+                try:
+                    await q.answer(msg, show_alert=True)
+                except Exception:
+                    try:
+                        await context.bot.send_message(chat_id=chat_id, text=msg)
+                    except Exception:
+                        pass
                 return
             if int(game.get("challenger_id")) != int(challenger_id) or int(game.get("opponent_id")) != int(opponent_id):
+                msg = "유효하지 않은 초대입니다."
+                try:
+                    await q.answer(msg, show_alert=True)
+                except Exception:
+                    try:
+                        await context.bot.send_message(chat_id=chat_id, text=msg)
+                    except Exception:
+                        pass
                 return
             if game.get("phase") != "invite":
+                msg = "이미 진행 중이거나 종료된 초대입니다."
+                try:
+                    await q.answer(msg, show_alert=True)
+                except Exception:
+                    try:
+                        await context.bot.send_message(chat_id=chat_id, text=msg)
+                    except Exception:
+                        pass
                 return
 
             cur_mid = int(q.message.message_id)
