@@ -3503,7 +3503,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     q = update.callback_query
     data = (q.data or "").strip()
-    await q.answer()
+    try:
+        await q.answer()
+    except Exception:
+        pass
 
     if data.startswith("pals_"):
         return
@@ -3812,6 +3815,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         _, cid, challenger_id, opponent_id, decision = parts
         if int(cid) != chat_id:
             return
+
+        try:
+            await q.message.edit_text("러시안룰렛 처리중...")
+        except Exception:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text="러시안룰렛 처리중...")
+            except Exception:
+                pass
+
         if q.from_user is None or int(q.from_user.id) != int(opponent_id):
             msg = "상대만 누를 수 있습니다."
             try:
