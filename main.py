@@ -3902,17 +3902,41 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             rr_cancel_jobs(context, game)
 
-            db = get_firebase_client()
-            dt = now_kst()
-            uref = user_ref(db, chat_id, int(opponent_id))
-            snap = uref.get()
-            udata = snap.to_dict() if snap.exists else {}
-            bal = int(udata.get("total_exp", 0))
-            if bal < 300:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text="[DEBUG] step1: cancel_jobs done, starting firestore")
+            except Exception:
+                pass
+
+            try:
+                db = get_firebase_client()
+                dt = now_kst()
+                uref = user_ref(db, chat_id, int(opponent_id))
+                snap = uref.get()
+                udata = snap.to_dict() if snap.exists else {}
+                bal = int(udata.get("total_exp", 0))
+
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] step2: firestore done, bal={bal}")
+                except Exception:
+                    pass
+
+                if bal < 300:
+                    set_active_rr(chat_id, None)
+                    await context.bot.send_message(chat_id=chat_id, text="잔고가 부족하여 수락할 수 없습니다. (필요 300$WHAT)")
+                    return
+                uref.set({"total_exp": bal - 300, "last_seen": dt}, merge=True)
+            except Exception as _fs_err:
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] firestore error: {type(_fs_err).__name__}: {_fs_err}")
+                except Exception:
+                    pass
                 set_active_rr(chat_id, None)
-                await context.bot.send_message(chat_id=chat_id, text="잔고가 부족하여 수락할 수 없습니다. (필요 300$WHAT)")
                 return
-            uref.set({"total_exp": bal - 300, "last_seen": dt}, merge=True)
+
+            try:
+                await context.bot.send_message(chat_id=chat_id, text="[DEBUG] step3: balance deducted, building RPS")
+            except Exception:
+                pass
 
             game["accepted"] = True
             game["pot"] = 300
@@ -3945,6 +3969,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "탄창은 6칸이며 랜덤 칸에 총알이 장전되어 있습니다. 가위바위보를 하여 순서정하기를 시작합니다.\n"
                 f"{cdisp}과 {odisp}는 가위 바위 보 중 하나를 골라주세요."
             )
+
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] step4: calling rr_set_message")
+            except Exception:
+                pass
 
             await rr_set_message(context, game, base, reply_markup=kb, countdown=30)
             set_active_rr(chat_id, game)
