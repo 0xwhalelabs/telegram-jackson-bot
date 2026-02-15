@@ -3845,9 +3845,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if int(cid) != chat_id:
             return
 
+        # DEBUG: send trace to chat
+        _dbg_parts = f"from={q.from_user.id if q.from_user else None} opp={opponent_id} dec={decision}"
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] rr_invite: {_dbg_parts}")
+        except Exception:
+            pass
+
         if q.from_user is None or int(q.from_user.id) != int(opponent_id):
             try:
-                await context.bot.send_message(chat_id=chat_id, text="상대만 누를 수 있습니다.")
+                await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] wrong user: from={q.from_user.id if q.from_user else None} != opp={opponent_id}")
             except Exception:
                 pass
             return
@@ -3856,6 +3863,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         try:
             game = get_active_rr(chat_id)
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=f"[DEBUG] game phase={game.get('phase') if game else 'None'}, game_opp={game.get('opponent_id') if game else 'N/A'}")
+            except Exception:
+                pass
             if game is None:
                 await context.bot.send_message(chat_id=chat_id, text="유효하지 않은 초대입니다.")
                 return
