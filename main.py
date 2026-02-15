@@ -3936,13 +3936,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await rr_set_message(context, game, base, reply_markup=kb, countdown=30)
             set_active_rr(chat_id, game)
             rr_start_action_timeout(context, game, [int(challenger_id), int(opponent_id)])
-        except Exception:
+        except Exception as _rr_err:
+            import traceback as _tb
+            _err_text = f"[DEBUG] rr_invite error: {type(_rr_err).__name__}: {_rr_err}\n{_tb.format_exc()[-500:]}"
             try:
                 set_active_rr(chat_id, None)
             except Exception:
                 pass
             try:
-                await context.bot.send_message(chat_id=chat_id, text="러시안룰렛 처리 중 오류가 발생했습니다.")
+                await context.bot.send_message(chat_id=chat_id, text=_err_text)
             except Exception:
                 pass
         return
