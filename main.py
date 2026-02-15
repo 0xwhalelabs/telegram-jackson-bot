@@ -655,20 +655,41 @@ async def fish_cast_delayed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         set_fishing_pending(chat_id, user_id, False)
         return
 
-    db = get_firebase_client()
-    dt = now_kst()
-    res = await _do_fishing_cast(db, chat_id, user_id, username, display, dt)
-    if not bool(res.get("ok")):
-        set_fishing_active(chat_id, user_id, False)
+    try:
+        db = get_firebase_client()
+        dt = now_kst()
+        res = await _do_fishing_cast(db, chat_id, user_id, username, display, dt)
+    except Exception:
         set_fishing_pending(chat_id, user_id, False)
+        msg = "낚시 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=str(res.get("msg") or "낚시에 실패했습니다."),
+                text=msg,
             )
         except Exception:
-            pass
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=msg)
+            except Exception:
+                pass
+        return
+
+    if not bool(res.get("ok")):
+        set_fishing_active(chat_id, user_id, False)
+        set_fishing_pending(chat_id, user_id, False)
+        msg = str(res.get("msg") or "낚시에 실패했습니다.")
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=msg,
+            )
+        except Exception:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=msg)
+            except Exception:
+                pass
         return
 
     remaining = int(res.get("remaining") or 0)
@@ -698,7 +719,14 @@ async def fish_cast_delayed_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=_fishing_kb(chat_id, user_id, message_id, can_continue=can_continue),
         )
     except Exception:
-        pass
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=_fishing_kb(chat_id, user_id, message_id, can_continue=can_continue),
+            )
+        except Exception:
+            pass
 
 
 def _coerce_int_dict(value: Any) -> Dict[str, int]:
@@ -3774,10 +3802,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
             if int(game.get("challenger_id")) != int(challenger_id) or int(game.get("opponent_id")) != int(opponent_id):
                 return
-            if int(game.get("message_id")) != int(q.message.message_id):
-                return
             if game.get("phase") != "invite":
                 return
+
+            cur_mid = int(q.message.message_id)
+            if int(game.get("message_id") or 0) != cur_mid:
+                game["message_id"] = cur_mid
+                set_active_rr(chat_id, game)
 
             if decision != "yes":
                 rr_cancel_jobs(context, game)
