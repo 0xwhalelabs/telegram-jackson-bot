@@ -1877,6 +1877,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "- !낚시: 낚시 1회 진행(하루 횟수 제한)\n"
             "- !낚시끝: 낚시 종료\n"
             "- !낚시법: 낚시 규칙/시세/판매/교환 설명\n"
+            "- !월척확률: 낚시 드랍 확률표\n"
             "\n"
             "[기타]\n"
             "- !whoami: 내 USER_ID/USERNAME 확인\n"
@@ -2376,8 +2377,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 continue
             rate = float(row["rate"]) * 100
             lines.append(
-                f"{lvl}강: {row['name']} | 확률 {rate:.2f}%"
+                f"{lvl}강: {rate:.2f}% (성공시 {row['name']})"
             )
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    if text.strip() == "!월척확률":
+        weights = [80.0, 40.0, 20.0, 1.0, 0.05]
+        labels = [
+            "쓰레기(가치 0)",
+            "흔한생선(80~150$WHAT)",
+            "희귀생선(500~800$WHAT)",
+            "강화 방어권(5000~8000$WHAT)",
+            f"{FISHING_SATOSHI_NOTE}(100000$WHAT)",
+        ]
+        total = float(sum(weights))
+        lines = ["낚시 확률(가중치 기준, 정규화)"]
+        for label, w in zip(labels, weights):
+            pct = (float(w) / total) * 100.0 if total > 0 else 0.0
+            lines.append(f"- {label}: {pct:.4f}%")
         await update.message.reply_text("\n".join(lines))
         return
 
@@ -3816,63 +3834,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if int(cid) != chat_id:
             return
 
-        try:
-            await q.message.edit_text("러시안룰렛 처리중...")
-        except Exception:
+        if q.from_user is None or int(q.from_user.id) != int(opponent_id):
             try:
-                await context.bot.send_message(chat_id=chat_id, text="러시안룰렛 처리중...")
+                await context.bot.send_message(chat_id=chat_id, text="상대만 누를 수 있습니다.")
             except Exception:
                 pass
-
-        if q.from_user is None or int(q.from_user.id) != int(opponent_id):
-            msg = "상대만 누를 수 있습니다."
-            try:
-                await q.answer(msg, show_alert=True)
-            except Exception:
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=msg)
-                except Exception:
-                    pass
             return
 
         cur_mid = int(q.message.message_id)
 
-        game_snapshot: Optional[Dict[str, Any]] = None
-        async with get_rr_chat_lock(chat_id):
+        try:
             game = get_active_rr(chat_id)
             if game is None:
-                msg = "유효하지 않은 초대입니다."
-                try:
-                    await q.answer(msg, show_alert=True)
-                except Exception:
-                    try:
-                        await context.bot.send_message(chat_id=chat_id, text=msg)
-                    except Exception:
-                        pass
+                await context.bot.send_message(chat_id=chat_id, text="유효하지 않은 초대입니다.")
                 return
             if int(game.get("challenger_id")) != int(challenger_id) or int(game.get("opponent_id")) != int(opponent_id):
-                msg = "유효하지 않은 초대입니다."
-                try:
-                    await q.answer(msg, show_alert=True)
-                except Exception:
-                    try:
-                        await context.bot.send_message(chat_id=chat_id, text=msg)
-                    except Exception:
-                        pass
+                await context.bot.send_message(chat_id=chat_id, text="유효하지 않은 초대입니다.")
                 return
             if game.get("phase") != "invite":
-                msg = "이미 진행 중이거나 종료된 초대입니다."
-                try:
-                    await q.answer(msg, show_alert=True)
-                except Exception:
-                    try:
-                        await context.bot.send_message(chat_id=chat_id, text=msg)
-                    except Exception:
-                        pass
+                await context.bot.send_message(chat_id=chat_id, text="이미 진행 중이거나 종료된 초대입니다.")
                 return
 
             if int(game.get("message_id") or 0) != cur_mid:
                 game["message_id"] = cur_mid
+                set_active_rr(chat_id, game)
 
             if decision != "yes":
                 rr_cancel_jobs(context, game)
@@ -3880,55 +3865,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 try:
                     await q.message.edit_text("러시안룰렛이 거절되었습니다.")
                 except Exception:
-                    pass
+                    await context.bot.send_message(chat_id=chat_id, text="러시안룰렛이 거절되었습니다.")
                 return
 
             rr_cancel_jobs(context, game)
-            game["phase"] = "invite_processing"
-            set_active_rr(chat_id, game)
-            game_snapshot = dict(game)
 
-        if game_snapshot is None:
-            return
-
-        db = get_firebase_client()
-        dt = now_kst()
-        try:
-            async with get_user_lock(chat_id, int(opponent_id)):
-                uref = user_ref(db, chat_id, int(opponent_id))
-                snap = uref.get()
-                udata = snap.to_dict() if snap.exists else {}
-                bal = int(udata.get("total_exp", 0))
-                if bal < 300:
-                    async with get_rr_chat_lock(chat_id):
-                        g2 = get_active_rr(chat_id)
-                        if g2 and g2.get("phase") == "invite_processing":
-                            set_active_rr(chat_id, None)
-                    try:
-                        await q.message.edit_text("잔고가 부족하여 수락할 수 없습니다. (필요 300$WHAT)")
-                    except Exception:
-                        pass
-                    return
-                uref.set({"total_exp": bal - 300, "last_seen": dt}, merge=True)
-        except Exception:
-            async with get_rr_chat_lock(chat_id):
-                g2 = get_active_rr(chat_id)
-                if g2 and g2.get("phase") == "invite_processing":
-                    set_active_rr(chat_id, None)
-            try:
-                await q.message.edit_text("처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
-            except Exception:
-                pass
-            return
-
-        async with get_rr_chat_lock(chat_id):
-            game = get_active_rr(chat_id)
-            if game is None:
+            db = get_firebase_client()
+            dt = now_kst()
+            uref = user_ref(db, chat_id, int(opponent_id))
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            bal = int(udata.get("total_exp", 0))
+            if bal < 300:
+                set_active_rr(chat_id, None)
+                try:
+                    await q.message.edit_text("잔고가 부족하여 수락할 수 없습니다. (필요 300$WHAT)")
+                except Exception:
+                    await context.bot.send_message(chat_id=chat_id, text="잔고가 부족하여 수락할 수 없습니다. (필요 300$WHAT)")
                 return
-            if int(game.get("challenger_id")) != int(challenger_id) or int(game.get("opponent_id")) != int(opponent_id):
-                return
-            if game.get("phase") != "invite_processing":
-                return
+            uref.set({"total_exp": bal - 300, "last_seen": dt}, merge=True)
 
             game["accepted"] = True
             game["pot"] = 300
@@ -3963,9 +3918,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"{cdisp}과 {odisp}는 가위 바위 보 중 하나를 골라주세요."
             )
 
-        await rr_set_message(context, game, base, reply_markup=kb, countdown=30)
-        set_active_rr(chat_id, game)
-        rr_start_action_timeout(context, game, [int(challenger_id), int(opponent_id)])
+            await rr_set_message(context, game, base, reply_markup=kb, countdown=30)
+            set_active_rr(chat_id, game)
+            rr_start_action_timeout(context, game, [int(challenger_id), int(opponent_id)])
+        except Exception:
+            try:
+                set_active_rr(chat_id, None)
+            except Exception:
+                pass
+            try:
+                await context.bot.send_message(chat_id=chat_id, text="러시안룰렛 처리 중 오류가 발생했습니다.")
+            except Exception:
+                pass
         return
 
     if data.startswith("rr_rps:"):
