@@ -329,10 +329,11 @@ async def rr_set_message(
     base_text: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
     countdown: Optional[int] = None,
+    edit_existing: bool = False,
 ) -> None:
     chat_id = int(game.get("chat_id") or 0)
     message_id = int(game.get("message_id") or 0)
-    if chat_id <= 0 or message_id <= 0:
+    if chat_id <= 0:
         return
 
     game["status_text"] = base_text
@@ -345,26 +346,31 @@ async def rr_set_message(
     text = base_text
     if countdown is not None:
         text = f"{base_text}\n\n남은 시간: {int(countdown)}초"
-    try:
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=reply_markup,
-        )
-    except Exception:
+
+    if edit_existing and message_id > 0:
         try:
-            sent = await context.bot.send_message(
+            await context.bot.edit_message_text(
                 chat_id=chat_id,
+                message_id=message_id,
                 text=text,
                 parse_mode="HTML",
                 reply_markup=reply_markup,
             )
-            game["message_id"] = int(sent.message_id)
-            set_active_rr(chat_id, game)
-        except Exception:
             return
+        except Exception:
+            pass
+
+    try:
+        sent = await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+        game["message_id"] = int(sent.message_id)
+        set_active_rr(chat_id, game)
+    except Exception:
+        return
 
 
 def rr_start_invite_timeout(context: ContextTypes.DEFAULT_TYPE, game: Dict[str, Any]) -> None:
@@ -430,94 +436,99 @@ async def rr_invite_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def rr_action_tick_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data or {}
     chat_id = int(data.get("chat_id") or 0)
-    message_id = int(data.get("message_id") or 0)
-    if chat_id <= 0 or message_id <= 0:
+    if chat_id <= 0:
         return
 
-    async with get_rr_chat_lock(chat_id):
-        game = get_active_rr(chat_id)
-        if not game:
-            context.job.schedule_removal()
-            return
-        if int(game.get("message_id") or 0) != message_id:
-            context.job.schedule_removal()
-            return
-        until = game.get("countdown_until")
-        if not until:
-            context.job.schedule_removal()
-            return
-        remaining = int((until - now_kst()).total_seconds())
+    game = get_active_rr(chat_id)
+    if not game:
+        context.job.schedule_removal()
+        return
+    cur_mid = int(game.get("message_id") or 0)
+    if cur_mid <= 0:
+        context.job.schedule_removal()
+        return
+    until = game.get("countdown_until")
+    if not until:
+        context.job.schedule_removal()
+        return
+    remaining = int((until - now_kst()).total_seconds())
 
-        base_text = str(game.get("status_text") or "")
-        phase = str(game.get("phase") or "")
-        required = game.get("required_user_ids")
-        if not isinstance(required, list):
-            required = []
+    base_text = str(game.get("status_text") or "")
+    phase = str(game.get("phase") or "")
+    required = game.get("required_user_ids")
+    if not isinstance(required, list):
+        required = []
 
-        reply_markup = game.get("last_reply_markup")
-        if remaining > 0:
-            text = f"{base_text}\n\n남은 시간: {remaining}초"
-        else:
-            forfeiter_id = 0
-            if phase == "rps":
-                choices = game.get("rps_choices")
-                if not isinstance(choices, dict):
-                    choices = {}
-                for uid in required:
-                    if str(int(uid)) not in choices:
-                        forfeiter_id = int(uid)
-                        break
-            elif phase == "order":
-                forfeiter_id = int(game.get("winner_id") or 0)
-            elif phase == "pick":
-                forfeiter_id = int(game.get("turn_id") or 0)
-
-            c_id = int(game.get("challenger_id") or 0)
-            o_id = int(game.get("opponent_id") or 0)
-            other_id = o_id if forfeiter_id == c_id else c_id
-            pot = int(game.get("pot") or 0)
-
-            if forfeiter_id and other_id and pot > 0:
-                db = get_firebase_client()
-                dt = now_kst()
-                lock1, lock2 = await acquire_two_user_locks(chat_id, c_id, o_id)
-                try:
-                    sref = user_ref(db, chat_id, other_id)
-                    ssnap = sref.get()
-                    sudata = ssnap.to_dict() if ssnap.exists else {}
-                    s_bal = int(sudata.get("total_exp", 0)) + pot
-                    sref.set({"total_exp": s_bal, "last_seen": dt}, merge=True)
-                finally:
-                    release_two_user_locks(lock1, lock2)
-
-            fdisp = user_link(
-                forfeiter_id,
-                str(game.get("challenger_display") if forfeiter_id == c_id else game.get("opponent_display")),
+    reply_markup = game.get("last_reply_markup")
+    if remaining > 0:
+        text = f"{base_text}\n\n남은 시간: {remaining}초"
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=cur_mid,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
             )
-            sdisp = user_link(
-                other_id,
-                str(game.get("challenger_display") if other_id == c_id else game.get("opponent_display")),
-            )
-            set_active_rr(chat_id, None)
-            text = (
-                f"시간 초과! {fdisp}님이 30초 내 선택하지 않아 기권패 처리되었습니다.\n"
-                f"{sdisp}님은 전리품으로 {pot}$WHAT을 획득하셨습니다."
-            )
-            reply_markup = None
+        except Exception:
+            pass
+        return
 
-        if remaining <= 0:
-            context.job.schedule_removal()
+    context.job.schedule_removal()
 
+    forfeiter_id = 0
+    if phase == "rps":
+        choices = game.get("rps_choices")
+        if not isinstance(choices, dict):
+            choices = {}
+        for uid in required:
+            if str(int(uid)) not in choices:
+                forfeiter_id = int(uid)
+                break
+    elif phase == "order":
+        forfeiter_id = int(game.get("winner_id") or 0)
+    elif phase == "pick":
+        forfeiter_id = int(game.get("turn_id") or 0)
+
+    c_id = int(game.get("challenger_id") or 0)
+    o_id = int(game.get("opponent_id") or 0)
+    other_id = o_id if forfeiter_id == c_id else c_id
+    pot = int(game.get("pot") or 0)
+
+    if forfeiter_id and other_id and pot > 0:
+        db = get_firebase_client()
+        dt = now_kst()
+        lock1, lock2 = await acquire_two_user_locks(chat_id, c_id, o_id)
+        try:
+            sref = user_ref(db, chat_id, other_id)
+            ssnap = sref.get()
+            sudata = ssnap.to_dict() if ssnap.exists else {}
+            s_bal = int(sudata.get("total_exp", 0)) + pot
+            sref.set({"total_exp": s_bal, "last_seen": dt}, merge=True)
+        finally:
+            release_two_user_locks(lock1, lock2)
+
+    fdisp = user_link(
+        forfeiter_id,
+        str(game.get("challenger_display") if forfeiter_id == c_id else game.get("opponent_display")),
+    )
+    sdisp = user_link(
+        other_id,
+        str(game.get("challenger_display") if other_id == c_id else game.get("opponent_display")),
+    )
+    set_active_rr(chat_id, None)
+    text = (
+        f"시간 초과! {fdisp}님이 30초 내 선택하지 않아 기권패 처리되었습니다.\n"
+        f"{sdisp}님은 전리품으로 {pot}$WHAT을 획득하셨습니다."
+    )
     try:
-        await context.bot.edit_message_text(
+        await context.bot.send_message(
             chat_id=chat_id,
-            message_id=message_id,
             text=text,
             parse_mode="HTML",
-            reply_markup=reply_markup,
         )
     except Exception:
-        return
+        pass
 
 
 def rps_result(a_choice: str, b_choice: str) -> int:
@@ -3862,10 +3873,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if decision != "yes":
                 rr_cancel_jobs(context, game)
                 set_active_rr(chat_id, None)
-                try:
-                    await q.message.edit_text("러시안룰렛이 거절되었습니다.")
-                except Exception:
-                    await context.bot.send_message(chat_id=chat_id, text="러시안룰렛이 거절되었습니다.")
+                await context.bot.send_message(chat_id=chat_id, text="러시안룰렛이 거절되었습니다.")
                 return
 
             rr_cancel_jobs(context, game)
@@ -3878,10 +3886,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             bal = int(udata.get("total_exp", 0))
             if bal < 300:
                 set_active_rr(chat_id, None)
-                try:
-                    await q.message.edit_text("잔고가 부족하여 수락할 수 없습니다. (필요 300$WHAT)")
-                except Exception:
-                    await context.bot.send_message(chat_id=chat_id, text="잔고가 부족하여 수락할 수 없습니다. (필요 300$WHAT)")
+                await context.bot.send_message(chat_id=chat_id, text="잔고가 부족하여 수락할 수 없습니다. (필요 300$WHAT)")
                 return
             uref.set({"total_exp": bal - 300, "last_seen": dt}, merge=True)
 
@@ -3889,7 +3894,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             game["pot"] = 300
             game["phase"] = "rps"
             game["rps_choices"] = {}
-            game["message_id"] = cur_mid
             set_active_rr(chat_id, game)
 
             kb = InlineKeyboardMarkup(
@@ -3949,8 +3953,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         async with get_rr_chat_lock(chat_id):
             game = get_active_rr(chat_id)
             if game is None or game.get("phase") != "rps":
-                return
-            if int(game.get("message_id")) != int(q.message.message_id):
                 return
 
             choices = game.get("rps_choices")
@@ -4036,8 +4038,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             game = get_active_rr(chat_id)
             if game is None or game.get("phase") != "order":
                 return
-            if int(game.get("message_id")) != int(q.message.message_id):
-                return
             if int(game.get("winner_id") or 0) != int(winner_id):
                 return
 
@@ -4084,8 +4084,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         async with get_rr_chat_lock(chat_id):
             game = get_active_rr(chat_id)
             if game is None or game.get("phase") != "pick":
-                return
-            if int(game.get("message_id")) != int(q.message.message_id):
                 return
 
             turn_id = int(game.get("turn_id") or 0)
@@ -4140,10 +4138,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     str(game.get("challenger_display") if survivor_id == c_id else game.get("opponent_display")),
                 )
                 try:
-                    await q.message.edit_text(
-                        f"{tdisp}님이 {slot}번을 고르셨습니다. 딸깍 드르르륵~\n"
-                        "총알을 발사합니다.\n"
-                        f"탕~ {tdisp}님은 총알을 맞고 사망하셨습니다. {sdisp}님은 전리품으로 {pot}$WHAT을 획득하셨습니다.",
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"{tdisp}님이 {slot}번을 고르셨습니다. 딸깍 드르르륵~\n"
+                            "총알을 발사합니다.\n"
+                            f"탕~ {tdisp}님은 총알을 맞고 사망하셨습니다. {sdisp}님은 전리품으로 {pot}$WHAT을 획득하셨습니다."
+                        ),
                         parse_mode="HTML",
                     )
                 except Exception:
