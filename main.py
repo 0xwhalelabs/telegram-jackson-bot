@@ -3835,6 +3835,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     pass
             return
 
+        cur_mid = int(q.message.message_id)
+
+        game_snapshot: Optional[Dict[str, Any]] = None
         async with get_rr_chat_lock(chat_id):
             game = get_active_rr(chat_id)
             if game is None:
@@ -3868,10 +3871,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         pass
                 return
 
-            cur_mid = int(q.message.message_id)
             if int(game.get("message_id") or 0) != cur_mid:
                 game["message_id"] = cur_mid
-                set_active_rr(chat_id, game)
 
             if decision != "yes":
                 rr_cancel_jobs(context, game)
@@ -3882,30 +3883,58 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     pass
                 return
 
-            db = get_firebase_client()
-            dt = now_kst()
-            lock1, lock2 = await acquire_two_user_locks(chat_id, int(challenger_id), int(opponent_id))
-            try:
+            rr_cancel_jobs(context, game)
+            game["phase"] = "invite_processing"
+            set_active_rr(chat_id, game)
+            game_snapshot = dict(game)
+
+        if game_snapshot is None:
+            return
+
+        db = get_firebase_client()
+        dt = now_kst()
+        try:
+            async with get_user_lock(chat_id, int(opponent_id)):
                 uref = user_ref(db, chat_id, int(opponent_id))
                 snap = uref.get()
                 udata = snap.to_dict() if snap.exists else {}
                 bal = int(udata.get("total_exp", 0))
                 if bal < 300:
+                    async with get_rr_chat_lock(chat_id):
+                        g2 = get_active_rr(chat_id)
+                        if g2 and g2.get("phase") == "invite_processing":
+                            set_active_rr(chat_id, None)
                     try:
                         await q.message.edit_text("잔고가 부족하여 수락할 수 없습니다. (필요 300$WHAT)")
                     except Exception:
                         pass
-                    rr_cancel_jobs(context, game)
-                    set_active_rr(chat_id, None)
                     return
                 uref.set({"total_exp": bal - 300, "last_seen": dt}, merge=True)
-            finally:
-                release_two_user_locks(lock1, lock2)
+        except Exception:
+            async with get_rr_chat_lock(chat_id):
+                g2 = get_active_rr(chat_id)
+                if g2 and g2.get("phase") == "invite_processing":
+                    set_active_rr(chat_id, None)
+            try:
+                await q.message.edit_text("처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+            except Exception:
+                pass
+            return
+
+        async with get_rr_chat_lock(chat_id):
+            game = get_active_rr(chat_id)
+            if game is None:
+                return
+            if int(game.get("challenger_id")) != int(challenger_id) or int(game.get("opponent_id")) != int(opponent_id):
+                return
+            if game.get("phase") != "invite_processing":
+                return
 
             game["accepted"] = True
             game["pot"] = 300
             game["phase"] = "rps"
             game["rps_choices"] = {}
+            game["message_id"] = cur_mid
             set_active_rr(chat_id, game)
 
             kb = InlineKeyboardMarkup(
@@ -3933,9 +3962,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "탄창은 6칸이며 랜덤 칸에 총알이 장전되어 있습니다. 가위바위보를 하여 순서정하기를 시작합니다.\n"
                 f"{cdisp}과 {odisp}는 가위 바위 보 중 하나를 골라주세요."
             )
-            await rr_set_message(context, game, base, reply_markup=kb, countdown=30)
-            set_active_rr(chat_id, game)
-            rr_start_action_timeout(context, game, [int(challenger_id), int(opponent_id)])
+
+        await rr_set_message(context, game, base, reply_markup=kb, countdown=30)
+        set_active_rr(chat_id, game)
+        rr_start_action_timeout(context, game, [int(challenger_id), int(opponent_id)])
         return
 
     if data.startswith("rr_rps:"):
