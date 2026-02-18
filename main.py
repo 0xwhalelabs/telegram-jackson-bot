@@ -1267,6 +1267,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"아직 숨겨져있는 보물은 총 {remaining}개 입니다.")
         return
 
+    if text.strip() == "!보물초기화":
+        if not is_owner(update):
+            await update.message.reply_text("권한이 없습니다.")
+            return
+        allowed = get_allowed_chat_id()
+        if allowed is not None and int(allowed) != int(chat_id):
+            return
+        async with get_chat_lock(chat_id):
+            cref2 = chat_ref(db, chat_id)
+            try:
+                cref2.update({
+                    "extra_treasure_map": firestore.DELETE_FIELD,
+                    "treasures_found_global": firestore.DELETE_FIELD,
+                    "treasure_daily_date": firestore.DELETE_FIELD,
+                    "treasure_daily_pool_index": firestore.DELETE_FIELD,
+                })
+            except Exception:
+                cref2.set({
+                    "extra_treasure_map": {},
+                    "treasures_found_global": {},
+                }, merge=True)
+        await update.message.reply_text("모든 보물 데이터가 초기화되었습니다. 수동으로 채워넣으세요.")
+        return
+
     if text.strip() == "!보물해금":
         if not is_owner(update):
             await update.message.reply_text("권한이 없습니다.")
@@ -1437,7 +1461,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 merge=True,
             )
 
-        await update.message.reply_text("숨은 보물찾기에 성공하였습니다.")
+        await update.message.reply_text(f"숨은 보물찾기에 성공하였습니다. ({TREASURE_REWARD_EXP}$WHAT 획득)")
         return
 
     if text.strip() == "!존스미스불러":
@@ -2953,20 +2977,20 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
     gained = 0
     total_exp = int(udata.get("total_exp", 0))
 
-    if can_count:
-        exp_res = calculate_exp(text, dt)
-        gained = exp_res.gained_exp
-        if gained > 0:
-            exp_events.append({"ts": dt, "exp": gained})
-            total_exp += gained
-
     exp_gained_date = udata.get("exp_gained_date")
     exp_gained_today = int(udata.get("exp_gained_today", 0))
     if exp_gained_date != today:
         exp_gained_today = 0
         exp_gained_date = today
-    if gained > 0:
-        exp_gained_today += gained
+
+    if can_count and exp_gained_today < 5000:
+        exp_res = calculate_exp(text, dt)
+        gained = exp_res.gained_exp
+        if gained > 0:
+            gained = min(gained, 5000 - exp_gained_today)
+            exp_events.append({"ts": dt, "exp": gained})
+            total_exp += gained
+            exp_gained_today += gained
 
     uref.set(
         {
@@ -2997,7 +3021,7 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
     return
 
 
-TREASURE_REWARD_EXP = 300
+TREASURE_REWARD_EXP = 100
 
 
 TREASURE_DAILY_POOL: List[str] = [
@@ -3109,7 +3133,7 @@ async def treasure_daily_add_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id=chat_id,
             text=(
                 "00시 신규 보물 5개가 추가되었습니다. "
-                "보물은 각각 300$WHAT를 지급합니다"
+                "보물은 각각 100$WHAT를 지급합니다"
             ),
         )
     except Exception:
