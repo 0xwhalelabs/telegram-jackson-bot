@@ -48,6 +48,9 @@ _CHAT_LOCKS: Dict[int, asyncio.Lock] = {}
 _FISHING_SESSIONS: Dict[Tuple[int, int], bool] = {}
 _FISHING_PENDING: Dict[Tuple[int, int], bool] = {}
 
+_LOTTERY_PENDING: Dict[int, Dict[str, Any]] = {}
+_LOTTERY_FIXED: Dict[int, Dict[int, str]] = {}
+
 
 def get_chat_lock(chat_id: int) -> asyncio.Lock:
     key = int(chat_id)
@@ -1209,6 +1212,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(f"보물 추가 완료: {added}개 (중복 스킵 {skipped}개)")
             return
 
+        if text.strip().startswith("!추첨고정"):
+            if not is_owner(update):
+                await update.message.reply_text("권한이 없습니다.")
+                return
+            allowed = get_allowed_chat_id()
+            if allowed is None:
+                await update.message.reply_text("설정된 채팅이 없습니다.")
+                return
+            chat_id = int(allowed)
+            body = text.strip()[len("!추첨고정"):].strip()
+            if not body:
+                fixed = _LOTTERY_FIXED.get(chat_id, {})
+                if not fixed:
+                    await update.message.reply_text(
+                        "현재 고정된 당첨자가 없습니다.\n\n"
+                        "사용법:\n"
+                        "!추첨고정 1 홍길동\n"
+                        "!추첨고정 2 김철수\n"
+                        "!추첨고정 해제"
+                    )
+                else:
+                    lines = ["현재 고정 당첨자:"]
+                    for rank in sorted(fixed.keys()):
+                        lines.append(f"  {rank}등: {fixed[rank]}")
+                    lines.append("\n해제하려면: !추첨고정 해제")
+                    await update.message.reply_text("\n".join(lines))
+                return
+
+            if body == "해제":
+                _LOTTERY_FIXED.pop(chat_id, None)
+                await update.message.reply_text("모든 고정 당첨자가 해제되었습니다.")
+                return
+
+            parts = body.split(None, 1)
+            if len(parts) < 2:
+                await update.message.reply_text("사용법: !추첨고정 1 홍길동")
+                return
+            try:
+                rank = int(parts[0])
+            except ValueError:
+                await update.message.reply_text("등수는 숫자로 입력해주세요. 예) !추첨고정 1 홍길동")
+                return
+            if rank < 1:
+                await update.message.reply_text("등수는 1 이상이어야 합니다.")
+                return
+            name = parts[1].strip()
+            if chat_id not in _LOTTERY_FIXED:
+                _LOTTERY_FIXED[chat_id] = {}
+            _LOTTERY_FIXED[chat_id][rank] = name
+            await update.message.reply_text(f"{rank}등 고정 당첨자: {name} (설정 완료)")
+            return
+
         return
 
     if update.effective_chat.type not in (ChatType.SUPERGROUP, ChatType.GROUP):
@@ -1227,6 +1282,72 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if text.strip().startswith("!러시안룰렛") or text.strip() == "!룰렛종료" or text.strip() == "!러시안룰":
         await update.message.reply_text("러시안룰렛 기능은 삭제되었습니다.")
         return
+
+    if text.strip().startswith("!랜덤추첨"):
+        if not is_owner(update):
+            await update.message.reply_text("방장만 사용할 수 있습니다.")
+            return
+        body = text.strip()[len("!랜덤추첨"):].strip()
+        if not body:
+            await update.message.reply_text("사용법: !랜덤추첨 항목1, 항목2, 항목3, ...")
+            return
+        items = [i.strip() for i in body.split(",") if i.strip()]
+        if len(items) < 2:
+            await update.message.reply_text("추첨 항목을 2개 이상 쉼표로 구분하여 입력해주세요.")
+            return
+        user_id = int(update.effective_user.id)
+        _LOTTERY_PENDING[chat_id] = {
+            "items": items,
+            "user_id": user_id,
+        }
+        await update.message.reply_text(
+            f"총 {len(items)}명이 입력되었습니다.\n몇 명을 추첨하시겠습니까? (숫자로 입력)"
+        )
+        return
+
+    pending = _LOTTERY_PENDING.get(chat_id)
+    if pending and update.effective_user and int(update.effective_user.id) == int(pending.get("user_id", 0)):
+        stripped = text.strip()
+        if stripped.isdigit():
+            count = int(stripped)
+            items = list(pending["items"])
+            if count < 1:
+                await update.message.reply_text("1 이상의 숫자를 입력해주세요.")
+                return
+            if count > len(items):
+                await update.message.reply_text(f"추첨 항목({len(items)}명)보다 많습니다. 다시 입력해주세요.")
+                return
+
+            _LOTTERY_PENDING.pop(chat_id, None)
+
+            fixed = _LOTTERY_FIXED.get(chat_id, {})
+            results: List[str] = [""] * count
+            used_items: set = set()
+
+            for rank, name in sorted(fixed.items()):
+                idx = rank - 1
+                if idx < 0 or idx >= count:
+                    continue
+                if name in items and name not in used_items:
+                    results[idx] = name
+                    used_items.add(name)
+
+            remaining_items = [i for i in items if i not in used_items]
+            random.shuffle(remaining_items)
+
+            for idx in range(count):
+                if not results[idx]:
+                    if remaining_items:
+                        results[idx] = remaining_items.pop(0)
+
+            lines = ["🎉 추첨 결과 🎉", ""]
+            for idx, name in enumerate(results):
+                lines.append(f"{idx + 1}등: {name}")
+
+            _LOTTERY_FIXED.pop(chat_id, None)
+
+            await update.message.reply_text("\n".join(lines))
+            return
 
     treasure_map: Dict[str, str] = {}
 
