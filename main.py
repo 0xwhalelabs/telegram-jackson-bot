@@ -2207,17 +2207,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 return
 
             prices = await _ensure_daily_fish_prices(db, chat_id, dt)
-            fish_total = 0
+            fish_only_total = 0
+            note_total = 0
             fish_lines: List[str] = []
             for name, cnt in sorted(fish_inv.items()):
                 if cnt <= 0:
                     continue
                 p = int(prices.get(name, 0))
-                fish_total += p * int(cnt)
+                fish_only_total += p * int(cnt)
                 fish_lines.append(f"- {name} x{int(cnt)} (개당 {p}$WHAT)")
             if note_cnt > 0:
-                fish_total += 100_000 * int(note_cnt)
+                note_total = 100_000 * int(note_cnt)
                 fish_lines.append(f"- {FISHING_SATOSHI_NOTE} x{int(note_cnt)} (개당 100000$WHAT)")
+            fish_total = fish_only_total + note_total
+
+            has_only_fish = fish_only_total > 0
+            has_only_note = note_cnt > 0
 
             rows: List[List[InlineKeyboardButton]] = []
             if has_sword_sell:
@@ -2233,11 +2238,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 rows.append(
                     [
                         InlineKeyboardButton(
-                            text=f"물고기 전부 판매 (+{int(fish_total)}$WHAT)",
+                            text=f"전부 판매 (+{int(fish_total)}$WHAT)",
                             callback_data=f"fish_sell_all:{chat_id}:{user_id}:yes",
                         )
                     ]
                 )
+                if has_only_fish and has_only_note:
+                    rows.append(
+                        [
+                            InlineKeyboardButton(
+                                text=f"비밀노트 제외 판매 (+{int(fish_only_total)}$WHAT)",
+                                callback_data=f"fish_sell_no_note:{chat_id}:{user_id}:yes",
+                            )
+                        ]
+                    )
+                    rows.append(
+                        [
+                            InlineKeyboardButton(
+                                text=f"비밀노트만 판매 (+{int(note_total)}$WHAT)",
+                                callback_data=f"fish_sell_note_only:{chat_id}:{user_id}:yes",
+                            )
+                        ]
+                    )
             rows.append(
                 [
                     InlineKeyboardButton(
@@ -3488,6 +3510,122 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         try:
             await q.message.edit_text(f"물고기 판매 완료! +{int(total)}$WHAT")
+        except Exception:
+            pass
+        return
+
+    if data.startswith("fish_sell_no_note:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, uid, decision = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("본인만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+        if decision != "yes":
+            try:
+                await q.message.edit_text("판매가 취소되었습니다.")
+            except Exception:
+                pass
+            return
+
+        db = get_firebase_client()
+        dt = now_kst()
+        today = kst_date_str(dt)
+        target_user_id = int(uid)
+        async with get_user_lock(chat_id, target_user_id):
+            uref = user_ref(db, chat_id, target_user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            fish_inv = _coerce_int_dict(udata.get("fish_inventory"))
+            if not fish_inv:
+                try:
+                    await q.message.edit_text("판매할 물고기가 없습니다.")
+                except Exception:
+                    pass
+                return
+
+            prices = await _ensure_daily_fish_prices(db, chat_id, dt)
+            total = 0
+            for name, cnt in fish_inv.items():
+                if int(cnt) <= 0:
+                    continue
+                total += int(prices.get(name, 0)) * int(cnt)
+
+            prev_total = int(udata.get("total_exp", 0))
+            new_total = prev_total + int(total)
+            uref.set(
+                {
+                    "total_exp": new_total,
+                    "fish_inventory": {},
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+
+        try:
+            await q.message.edit_text(f"비밀노트 제외 판매 완료! +{int(total)}$WHAT")
+        except Exception:
+            pass
+        return
+
+    if data.startswith("fish_sell_note_only:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, uid, decision = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("본인만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+        if decision != "yes":
+            try:
+                await q.message.edit_text("판매가 취소되었습니다.")
+            except Exception:
+                pass
+            return
+
+        db = get_firebase_client()
+        dt = now_kst()
+        today = kst_date_str(dt)
+        target_user_id = int(uid)
+        async with get_user_lock(chat_id, target_user_id):
+            uref = user_ref(db, chat_id, target_user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            note_cnt = int(udata.get("satoshi_note", 0))
+            if note_cnt <= 0:
+                try:
+                    await q.message.edit_text("판매할 비밀노트가 없습니다.")
+                except Exception:
+                    pass
+                return
+
+            total = 100_000 * int(note_cnt)
+            prev_total = int(udata.get("total_exp", 0))
+            new_total = prev_total + int(total)
+            uref.set(
+                {
+                    "total_exp": new_total,
+                    "satoshi_note": 0,
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+
+        try:
+            await q.message.edit_text(f"비밀노트 판매 완료! +{int(total)}$WHAT")
         except Exception:
             pass
         return
