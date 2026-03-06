@@ -2768,6 +2768,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await handle_exp_query(update, context)
         return
 
+    if text.strip().startswith("!왈렛의포상"):
+        if not is_owner(update):
+            await update.message.reply_text("권한이 없습니다.")
+            return
+        body = text.strip()[len("!왈렛의포상"):].strip()
+        if not body:
+            await update.message.reply_text("사용법: !왈렛의포상 @유저네임")
+            return
+        uname = _normalize_username(body)
+        if not uname:
+            await update.message.reply_text("유저네임을 입력해주세요. (예: !왈렛의포상 @username)")
+            return
+        chat_id = int(update.effective_chat.id)
+        db = get_firebase_client()
+        dt = now_kst()
+        doc = _find_user_doc_by_username(db, chat_id, uname)
+        if doc is None:
+            await update.message.reply_text(f"@{uname} 유저를 찾을 수 없습니다.")
+            return
+        target_uid = int(doc.id)
+        async with get_user_lock(chat_id, target_uid):
+            uref = user_ref(db, chat_id, target_uid)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            tickets_list, _ = defense_tickets_list_from_udata(udata, dt)
+            tickets_list.append(dt + timedelta(seconds=DEFENSE_TICKET_TTL_SECONDS))
+            tickets_list.sort()
+            uref.set(
+                {
+                    "defense_tickets_list": tickets_list,
+                    "defense_tickets": len(tickets_list),
+                    "last_seen": dt,
+                },
+                merge=True,
+            )
+        await update.message.reply_text(f"@{uname}님에게 강화 방어권 1장을 지급했습니다. (현재 {len(tickets_list)}장)")
+        return
+
     if text.strip() == "!포상금":
         if not is_owner(update):
             await update.message.reply_text("권한이 없습니다.")
