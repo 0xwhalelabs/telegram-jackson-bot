@@ -1775,12 +1775,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "- 봇이 랜덤 시간에 !띱을 외치면 가장 먼저 !띱을 친 유저가\n"
             "  강화 방어권 1장 획득! (하루 3회, 60초 제한)\n"
             "\n"
-            "[방장 전용]\n"
-            "- !랜덤추첨 항목1,항목2,...: 랜덤 추첨\n"
-            "- !왈렛의포상 @유저네임: 강화 방어권 지급\n"
-            "- !포상금: $WHAT 지급\n"
-            "- !추첨고정: DM에서 추첨 고정 당첨자 설정\n"
-            "\n"
             "[기타]\n"
             "- !whoami: 내 USER_ID/USERNAME 확인\n"
         )
