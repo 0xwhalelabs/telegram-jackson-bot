@@ -51,6 +51,8 @@ _FISHING_PENDING: Dict[Tuple[int, int], bool] = {}
 _LOTTERY_PENDING: Dict[int, Dict[str, Any]] = {}
 _LOTTERY_FIXED: Dict[int, Dict[int, str]] = {}
 
+_DDIP_ACTIVE: Dict[int, bool] = {}
+
 
 def get_chat_lock(chat_id: int) -> asyncio.Lock:
     key = int(chat_id)
@@ -1281,6 +1283,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if text.strip().startswith("!러시안룰렛") or text.strip() == "!룰렛종료" or text.strip() == "!러시안룰":
         await update.message.reply_text("러시안룰렛 기능은 삭제되었습니다.")
+        return
+
+    if text.strip() == "!띱":
+        if not _DDIP_ACTIVE.get(chat_id):
+            return
+        _DDIP_ACTIVE.pop(chat_id, None)
+        for job in context.job_queue.jobs():
+            if job.name and job.name == f"ddip_expire:{chat_id}":
+                job.schedule_removal()
+        user_id = int(update.effective_user.id)
+        db = get_firebase_client()
+        dt = now_kst()
+        async with get_user_lock(chat_id, user_id):
+            uref = user_ref(db, chat_id, user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            tickets_list, _ = defense_tickets_list_from_udata(udata, dt)
+            tickets_list.append(dt + timedelta(seconds=DEFENSE_TICKET_TTL_SECONDS))
+            tickets_list.sort()
+            uref.set(
+                {
+                    "defense_tickets_list": tickets_list,
+                    "defense_tickets": len(tickets_list),
+                    "last_seen": dt,
+                },
+                merge=True,
+            )
+        username = update.effective_user.username
+        display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+        await update.message.reply_text(f"{display}님이 가장 먼저 !띱을 외쳤습니다! 강화 방어권 1장 지급! (현재 {len(tickets_list)}장)")
         return
 
     if text.strip().startswith("!랜덤추첨"):
@@ -4736,6 +4768,81 @@ async def send_leaderboard(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
 
+DDIP_TIMEOUT_SECONDS = 60
+
+
+async def _ddip_fire_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed = get_allowed_chat_id()
+    if allowed is None:
+        return
+    chat_id = int(allowed)
+    _DDIP_ACTIVE[chat_id] = True
+    try:
+        await context.bot.send_message(chat_id=chat_id, text="!띱")
+    except Exception:
+        _DDIP_ACTIVE.pop(chat_id, None)
+        return
+
+    context.job_queue.run_once(
+        _ddip_expire_job,
+        when=DDIP_TIMEOUT_SECONDS,
+        name=f"ddip_expire:{chat_id}",
+        data={"chat_id": chat_id},
+    )
+
+
+async def _ddip_expire_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data or {}
+    chat_id = int(data.get("chat_id", 0))
+    if not chat_id:
+        return
+    was_active = _DDIP_ACTIVE.pop(chat_id, False)
+    if was_active:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="아무도 !띱을 외치지 않았습니다. 강화 방어권이 사라집니다.")
+        except Exception:
+            pass
+
+
+def _schedule_ddip_jobs(job_queue, kst) -> None:
+    from zoneinfo import ZoneInfo
+    dt = now_kst()
+    today_start = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    times = []
+    for _ in range(3):
+        h = random.randint(9, 23)
+        m = random.randint(0, 59)
+        s = random.randint(0, 59)
+        t = today_start.replace(hour=h, minute=m, second=s)
+        times.append(t)
+    times.sort()
+
+    for i, t in enumerate(times):
+        delay = (t - dt).total_seconds()
+        if delay < 10:
+            continue
+        job_queue.run_once(
+            _ddip_fire_job,
+            when=delay,
+            name=f"ddip_fire:{i}",
+        )
+
+
+async def _ddip_daily_schedule_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    from zoneinfo import ZoneInfo
+    kst = ZoneInfo(KST_TZ)
+    for job in context.job_queue.jobs():
+        if job.name and job.name.startswith("ddip_fire:"):
+            job.schedule_removal()
+    _schedule_ddip_jobs(context.job_queue, kst)
+
+
+async def _ddip_startup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    from zoneinfo import ZoneInfo
+    kst = ZoneInfo(KST_TZ)
+    _schedule_ddip_jobs(context.job_queue, kst)
+
+
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -4751,8 +4858,10 @@ def main() -> None:
     kst = ZoneInfo(KST_TZ)
     application.job_queue.run_once(treasure_startup_ensure_job, when=0)
     application.job_queue.run_once(fish_market_daily_job, when=0)
+    application.job_queue.run_once(_ddip_startup_job, when=5)
     application.job_queue.run_daily(treasure_daily_add_job, time=time(0, 0, tzinfo=kst))
     application.job_queue.run_daily(fish_market_daily_job, time=time(0, 0, tzinfo=kst))
+    application.job_queue.run_daily(_ddip_daily_schedule_job, time=time(0, 1, tzinfo=kst))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
