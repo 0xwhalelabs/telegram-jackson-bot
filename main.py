@@ -4958,7 +4958,7 @@ def _schedule_ddip_jobs(job_queue, kst) -> None:
     today_start = dt.replace(hour=0, minute=0, second=0, microsecond=0)
     times = []
     for _ in range(3):
-        h = random.randint(9, 23)
+        h = random.randint(10, 23)
         m = random.randint(0, 59)
         s = random.randint(0, 59)
         t = today_start.replace(hour=h, minute=m, second=s)
