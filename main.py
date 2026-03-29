@@ -53,6 +53,15 @@ _LOTTERY_FIXED: Dict[int, Dict[int, str]] = {}
 
 _DDIP_ACTIVE: Dict[int, bool] = {}
 
+# ─── 복권 시스템 상수 ─────────────────────────────────────────
+LOTTO_TICKET_PRICE = 100          # 복권 1장 가격 ($WHAT)
+LOTTO_MAX_TICKETS_PER_DAY = 5     # 1인 하루 최대 구매 수
+LOTTO_NUMBER_MIN = 1              # 복권 숫자 최소
+LOTTO_NUMBER_MAX = 100            # 복권 숫자 최대
+LOTTO_SALE_START_HOUR = 9         # 판매 시작 시각 (KST)
+LOTTO_SALE_END_HOUR = 20          # 판매 종료 시각 (KST, 20시=오후 8시)
+LOTTO_DRAW_HOUR = 21              # 추첨 시각 (KST, 21시=오후 9시)
+
 HORSE_NAMES: List[str] = ["얼룩이", "덜룩이", "얼렁이", "덜렁이", "얼탱이", "덜탱이"]
 HORSE_BET_COST = 50
 
@@ -1392,6 +1401,131 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"{display}님이 가장 먼저 !띱을 외쳤습니다! 강화 방어권 1장 지급! (현재 {len(tickets_list)}장)")
         return
 
+    # ─── 복권 시스템 명령어 ─────────────────────────────────────
+    if text.strip() == "!복권":
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 `!복권`을 입력해 주세요."
+            )
+            return
+
+        user_id = int(update.effective_user.id)
+        dt = now_kst()
+
+        if not _is_lotto_sale_open(dt):
+            await update.message.reply_text(
+                f"복권 판매 시간이 아닙니다.\n"
+                f"판매 시간: 오전 {LOTTO_SALE_START_HOUR}시 ~ 오후 {LOTTO_SALE_END_HOUR - 12}시\n"
+                f"추첨: 오후 {LOTTO_DRAW_HOUR - 12}시"
+            )
+            return
+
+        username = update.effective_user.username
+        display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+
+        db = get_firebase_client()
+        res = await _buy_lotto_ticket(db, chat_id, user_id, username, display, dt)
+
+        if not res.get("ok"):
+            await update.message.reply_text(str(res.get("msg", "복권 구매에 실패했습니다.")))
+            return
+
+        await update.message.reply_text(
+            f"🎰 복권 구매 완료!\n\n"
+            f"🔢 번호: {res['number']}\n"
+            f"💰 차감: {LOTTO_TICKET_PRICE}$WHAT (잔고: {res['balance']}$WHAT)\n"
+            f"🎫 남은 구매 가능: {res['remaining']}장\n"
+            f"💰 현재 상금 풀: {res['pool']}$WHAT\n\n"
+            f"추첨은 오후 {LOTTO_DRAW_HOUR - 12}시에 진행됩니다!"
+        )
+        return
+
+    if text.strip() == "!내복권":
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text(
+                "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
+                "익명 관리자 모드를 끄고 다시 `!내복권`을 입력해 주세요."
+            )
+            return
+
+        user_id = int(update.effective_user.id)
+        dt = now_kst()
+        today = kst_date_str(dt)
+        username = update.effective_user.username
+        display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+
+        db = get_firebase_client()
+        async with get_chat_lock(chat_id):
+            cref = chat_ref(db, chat_id)
+            csnap = cref.get()
+            cdata = csnap.to_dict() if csnap.exists else {}
+            lotto_tickets = cdata.get("lotto_tickets")
+            if not isinstance(lotto_tickets, dict):
+                lotto_tickets = {}
+            lotto_pool = int(cdata.get("lotto_pool", 0))
+            lotto_pool_date = cdata.get("lotto_pool_date")
+            lotto_carryover = int(cdata.get("lotto_carryover", 0))
+
+        if lotto_pool_date != today:
+            lotto_pool = lotto_carryover
+            lotto_tickets = {}
+
+        uid_key = str(user_id)
+        my_tickets = lotto_tickets.get(uid_key)
+        if not isinstance(my_tickets, list) or not my_tickets:
+            await update.message.reply_text(f"{display}님은 오늘 구매한 복권이 없습니다.")
+            return
+
+        numbers_str = ", ".join(str(int(n)) for n in my_tickets)
+        await update.message.reply_text(
+            f"🎰 {display}님의 오늘 복권\n\n"
+            f"🎫 보유 {len(my_tickets)}장: [{numbers_str}]\n"
+            f"💰 현재 상금 풀: {lotto_pool}$WHAT\n"
+            f"추첨: 오후 {LOTTO_DRAW_HOUR - 12}시"
+        )
+        return
+
+    if text.strip() == "!복권현황":
+        dt = now_kst()
+        today = kst_date_str(dt)
+
+        db = get_firebase_client()
+        async with get_chat_lock(chat_id):
+            cref = chat_ref(db, chat_id)
+            csnap = cref.get()
+            cdata = csnap.to_dict() if csnap.exists else {}
+            lotto_tickets = cdata.get("lotto_tickets")
+            if not isinstance(lotto_tickets, dict):
+                lotto_tickets = {}
+            lotto_pool = int(cdata.get("lotto_pool", 0))
+            lotto_pool_date = cdata.get("lotto_pool_date")
+            lotto_carryover = int(cdata.get("lotto_carryover", 0))
+
+        if lotto_pool_date != today:
+            lotto_pool = lotto_carryover
+            lotto_tickets = {}
+
+        total_tickets = sum(
+            len(nums) for nums in lotto_tickets.values() if isinstance(nums, list)
+        )
+        buyer_count = sum(
+            1 for nums in lotto_tickets.values() if isinstance(nums, list) and len(nums) > 0
+        )
+
+        sale_status = "판매 중 🟢" if _is_lotto_sale_open(dt) else "판매 종료 🔴"
+        carryover_line = f"\n💰 이월 상금 포함" if lotto_carryover > 0 and lotto_pool_date != today else ""
+
+        await update.message.reply_text(
+            f"🎰 오늘의 복권 현황\n\n"
+            f"상태: {sale_status}\n"
+            f"🎫 총 판매: {total_tickets}장 ({buyer_count}명)\n"
+            f"💰 현재 상금 풀: {lotto_pool}$WHAT{carryover_line}\n"
+            f"판매 시간: 오전 {LOTTO_SALE_START_HOUR}시 ~ 오후 {LOTTO_SALE_END_HOUR - 12}시\n"
+            f"추첨: 오후 {LOTTO_DRAW_HOUR - 12}시"
+        )
+        return
+
     if text.strip().startswith("!랜덤추첨"):
         if not is_owner(update):
             await update.message.reply_text("방장만 사용할 수 있습니다.")
@@ -1774,6 +1908,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "[띱 이벤트]\n"
             "- 봇이 랜덤 시간에 !띱을 외치면 가장 먼저 !띱을 친 유저가\n"
             "  강화 방어권 1장 획득! (하루 3회, 60초 제한)\n"
+            "\n"
+            "[복권]\n"
+            f"- !복권: 복권 구매 ({LOTTO_TICKET_PRICE}$WHAT, 1인 하루 {LOTTO_MAX_TICKETS_PER_DAY}장)\n"
+            f"  판매 시간: 오전 {LOTTO_SALE_START_HOUR}시 ~ 오후 {LOTTO_SALE_END_HOUR - 12}시\n"
+            "- !내복권: 내가 구매한 복권 번호 확인\n"
+            "- !복권현황: 오늘의 복권 상금/판매 현황\n"
+            f"  1~100 랜덤 번호, 오후 {LOTTO_DRAW_HOUR - 12}시 추첨\n"
+            "  당첨자 간 상금 N분의1, 미당첨시 이월\n"
             "\n"
             "[기타]\n"
             "- !whoami: 내 USER_ID/USERNAME 확인\n"
@@ -4886,6 +5028,280 @@ async def send_leaderboard(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
 
+# ─── 복권 시스템 로직 ─────────────────────────────────────────
+
+def _is_lotto_sale_open(dt: datetime) -> bool:
+    return LOTTO_SALE_START_HOUR <= dt.hour < LOTTO_SALE_END_HOUR
+
+
+async def _buy_lotto_ticket(
+    db: firestore.Client, chat_id: int, user_id: int, username: Optional[str],
+    display: str, dt: datetime,
+) -> Dict[str, Any]:
+    today = kst_date_str(dt)
+    async with get_user_lock(int(chat_id), int(user_id)):
+        uref = user_ref(db, int(chat_id), int(user_id))
+        snap = uref.get()
+        udata = snap.to_dict() if snap.exists else {}
+
+        lotto_date = udata.get("lotto_buy_date")
+        lotto_count = int(udata.get("lotto_tickets_today", 0))
+        if lotto_date != today:
+            lotto_count = 0
+
+        if lotto_count >= LOTTO_MAX_TICKETS_PER_DAY:
+            return {"ok": False, "msg": f"오늘 복권 구매 한도({LOTTO_MAX_TICKETS_PER_DAY}장)를 모두 사용했습니다."}
+
+        total_exp = int(udata.get("total_exp", 0))
+        if total_exp < LOTTO_TICKET_PRICE:
+            return {"ok": False, "msg": f"잔고가 부족합니다. (필요 {LOTTO_TICKET_PRICE}$WHAT, 보유 {total_exp}$WHAT)"}
+
+        ticket_number = random.randint(LOTTO_NUMBER_MIN, LOTTO_NUMBER_MAX)
+
+        total_exp -= LOTTO_TICKET_PRICE
+        lotto_count += 1
+
+        uref.set(
+            {
+                "user_id": int(user_id),
+                "username": username or None,
+                "display": display,
+                "total_exp": total_exp,
+                "lotto_buy_date": today,
+                "lotto_tickets_today": lotto_count,
+                "last_seen": dt,
+                "last_active_date": today,
+            },
+            merge=True,
+        )
+
+    async with get_chat_lock(int(chat_id)):
+        cref = chat_ref(db, int(chat_id))
+        csnap = cref.get()
+        cdata = csnap.to_dict() if csnap.exists else {}
+
+        lotto_pool_date = cdata.get("lotto_pool_date")
+        lotto_pool = int(cdata.get("lotto_pool", 0))
+        lotto_carryover = int(cdata.get("lotto_carryover", 0))
+        lotto_tickets = cdata.get("lotto_tickets")
+        if not isinstance(lotto_tickets, dict):
+            lotto_tickets = {}
+
+        if lotto_pool_date != today:
+            lotto_pool = lotto_carryover
+            lotto_tickets = {}
+
+        lotto_pool += LOTTO_TICKET_PRICE
+
+        uid_key = str(int(user_id))
+        user_tickets = lotto_tickets.get(uid_key)
+        if not isinstance(user_tickets, list):
+            user_tickets = []
+        user_tickets.append(ticket_number)
+        lotto_tickets[uid_key] = user_tickets
+
+        cref.set(
+            {
+                "chat_id": int(chat_id),
+                "lotto_pool_date": today,
+                "lotto_pool": lotto_pool,
+                "lotto_tickets": lotto_tickets,
+                "last_seen": dt,
+            },
+            merge=True,
+        )
+
+    remaining = LOTTO_MAX_TICKETS_PER_DAY - lotto_count
+    return {
+        "ok": True,
+        "number": ticket_number,
+        "remaining": remaining,
+        "pool": lotto_pool,
+        "balance": total_exp,
+    }
+
+
+async def lotto_draw_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed = get_allowed_chat_id()
+    if allowed is None:
+        return
+    chat_id = int(allowed)
+    db = get_firebase_client()
+    dt = now_kst()
+    today = kst_date_str(dt)
+
+    # Phase 1: read ticket data and update chat state under chat lock
+    async with get_chat_lock(chat_id):
+        cref = chat_ref(db, chat_id)
+        csnap = cref.get()
+        cdata = csnap.to_dict() if csnap.exists else {}
+
+        if cdata.get("lotto_draw_date") == today:
+            return
+
+        lotto_pool_date = cdata.get("lotto_pool_date")
+        lotto_pool = int(cdata.get("lotto_pool", 0))
+        lotto_carryover = int(cdata.get("lotto_carryover", 0))
+        lotto_tickets = cdata.get("lotto_tickets")
+        if not isinstance(lotto_tickets, dict):
+            lotto_tickets = {}
+
+        if lotto_pool_date != today:
+            lotto_pool = lotto_carryover
+            lotto_tickets = {}
+
+        if not lotto_tickets:
+            cref.set(
+                {
+                    "chat_id": chat_id,
+                    "lotto_draw_date": today,
+                    "lotto_winning_number": None,
+                    "last_seen": dt,
+                },
+                merge=True,
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="🎰 오늘의 복권 추첨!\n\n오늘은 복권 구매자가 없어 추첨이 진행되지 않았습니다.",
+                )
+            except Exception:
+                pass
+            return
+
+        winning_number = random.randint(LOTTO_NUMBER_MIN, LOTTO_NUMBER_MAX)
+
+        winners: Dict[int, int] = {}
+        total_ticket_count = 0
+        for uid_str, numbers in lotto_tickets.items():
+            if not isinstance(numbers, list):
+                continue
+            total_ticket_count += len(numbers)
+            win_count = sum(1 for n in numbers if int(n) == winning_number)
+            if win_count > 0:
+                winners[int(uid_str)] = win_count
+
+        if winners:
+            total_winning_tickets = sum(winners.values())
+            prize_per_ticket = lotto_pool // total_winning_tickets
+            remainder = lotto_pool - (prize_per_ticket * total_winning_tickets)
+
+            cref.set(
+                {
+                    "chat_id": chat_id,
+                    "lotto_draw_date": today,
+                    "lotto_winning_number": winning_number,
+                    "lotto_pool": 0,
+                    "lotto_carryover": remainder,
+                    "last_seen": dt,
+                },
+                merge=True,
+            )
+        else:
+            cref.set(
+                {
+                    "chat_id": chat_id,
+                    "lotto_draw_date": today,
+                    "lotto_winning_number": winning_number,
+                    "lotto_carryover": lotto_pool,
+                    "lotto_pool": 0,
+                    "last_seen": dt,
+                },
+                merge=True,
+            )
+
+    # Phase 2: distribute prizes outside chat lock to avoid deadlock
+    if winners:
+        winner_lines: List[str] = []
+        for uid, win_cnt in winners.items():
+            prize = prize_per_ticket * win_cnt
+            async with get_user_lock(chat_id, uid):
+                uref2 = user_ref(db, chat_id, uid)
+                snap2 = uref2.get()
+                udata2 = snap2.to_dict() if snap2.exists else {}
+                new_total = int(udata2.get("total_exp", 0)) + prize
+                winner_display = udata2.get("display") or (
+                    f"@{udata2.get('username')}" if udata2.get("username") else str(uid)
+                )
+                uref2.set({"total_exp": new_total, "last_seen": dt}, merge=True)
+            winner_lines.append(f"  🏆 {winner_display} — {win_cnt}장 당첨 → +{prize}$WHAT")
+
+        msg = (
+            f"🎰 오늘의 복권 추첨!\n\n"
+            f"🔢 당첨 번호: {winning_number}\n"
+            f"💰 총 상금: {lotto_pool}$WHAT\n"
+            f"🎫 총 판매: {total_ticket_count}장\n"
+            f"🎉 당첨자 {len(winners)}명!\n\n"
+            + "\n".join(winner_lines)
+        )
+    else:
+        msg = (
+            f"🎰 오늘의 복권 추첨!\n\n"
+            f"🔢 당첨 번호: {winning_number}\n"
+            f"🎫 총 판매: {total_ticket_count}장\n\n"
+            f"😢 당첨자가 없습니다!\n"
+            f"💰 상금 {lotto_pool}$WHAT이 내일로 이월됩니다."
+        )
+
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception:
+        pass
+
+
+async def lotto_daily_reset_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed = get_allowed_chat_id()
+    if allowed is None:
+        return
+    chat_id = int(allowed)
+    db = get_firebase_client()
+    dt = now_kst()
+    today = kst_date_str(dt)
+
+    async with get_chat_lock(chat_id):
+        cref = chat_ref(db, chat_id)
+        csnap = cref.get()
+        cdata = csnap.to_dict() if csnap.exists else {}
+
+        carryover = int(cdata.get("lotto_carryover", 0))
+        cref.set(
+            {
+                "chat_id": chat_id,
+                "lotto_pool_date": today,
+                "lotto_pool": carryover,
+                "lotto_tickets": {},
+                "last_seen": dt,
+            },
+            merge=True,
+        )
+
+    if carryover > 0:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"🎰 복권 판매 시작!\n\n"
+                    f"오전 9시 ~ 오후 8시까지 !복권 으로 구매 가능\n"
+                    f"1장당 {LOTTO_TICKET_PRICE}$WHAT (1인 {LOTTO_MAX_TICKETS_PER_DAY}장)\n"
+                    f"💰 이월 상금: {carryover}$WHAT"
+                ),
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"🎰 복권 판매 시작!\n\n"
+                    f"오전 9시 ~ 오후 8시까지 !복권 으로 구매 가능\n"
+                    f"1장당 {LOTTO_TICKET_PRICE}$WHAT (1인 {LOTTO_MAX_TICKETS_PER_DAY}장)"
+                ),
+            )
+        except Exception:
+            pass
+
+
 DDIP_TIMEOUT_SECONDS = 60
 
 
@@ -4980,6 +5396,8 @@ def main() -> None:
     application.job_queue.run_daily(treasure_daily_add_job, time=time(0, 0, tzinfo=kst))
     application.job_queue.run_daily(fish_market_daily_job, time=time(0, 0, tzinfo=kst))
     application.job_queue.run_daily(_ddip_daily_schedule_job, time=time(0, 1, tzinfo=kst))
+    application.job_queue.run_daily(lotto_draw_job, time=time(LOTTO_DRAW_HOUR, 0, tzinfo=kst))
+    application.job_queue.run_daily(lotto_daily_reset_job, time=time(LOTTO_SALE_START_HOUR, 0, tzinfo=kst))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
