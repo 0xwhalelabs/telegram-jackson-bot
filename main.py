@@ -3796,10 +3796,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     q = update.callback_query
     data = (q.data or "").strip()
-    try:
-        await q.answer()
-    except Exception:
-        pass
+
+    if not data.startswith("horse_pick:"):
+        try:
+            await q.answer()
+        except Exception:
+            pass
 
     if data.startswith("pals_"):
         return
@@ -4177,15 +4179,31 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data.startswith("horse_pick:"):
         parts = data.split(":")
         if len(parts) != 3:
+            print(f"[HORSE] bad parts count: {len(parts)} data={data!r}")
+            try:
+                await q.answer()
+            except Exception:
+                pass
             return
         _, cid, chosen_horse = parts
         if int(cid) != chat_id:
+            print(f"[HORSE] chat mismatch: cid={cid} chat_id={chat_id}")
+            try:
+                await q.answer()
+            except Exception:
+                pass
             return
         if chosen_horse not in HORSE_NAMES:
+            print(f"[HORSE] unknown horse: {chosen_horse!r}")
+            try:
+                await q.answer()
+            except Exception:
+                pass
             return
 
         session = _HORSE_SESSIONS.get(chat_id)
         if session is None:
+            print(f"[HORSE] no session for chat_id={chat_id}, keys={list(_HORSE_SESSIONS.keys())}")
             try:
                 await q.answer("현재 진행 중인 경마가 없습니다.", show_alert=True)
             except Exception:
@@ -4193,10 +4211,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         if q.from_user is None:
+            print("[HORSE] q.from_user is None")
+            try:
+                await q.answer()
+            except Exception:
+                pass
             return
         user_id = int(q.from_user.id)
         username = q.from_user.username
         display = f"@{username}" if username else (q.from_user.full_name or str(user_id))
+        print(f"[HORSE] user={user_id} ({display}) picking {chosen_horse}")
 
         players = session.get("players", {})
         taken = session.get("taken_horses", set())
@@ -4236,6 +4260,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 snap = uref.get()
                 udata = snap.to_dict() if snap.exists else {}
                 if udata.get("horse_race_date") == today:
+                    print(f"[HORSE] user={user_id} already played today")
                     try:
                         await q.answer("오늘은 이미 경마에 참여하셨습니다.", show_alert=True)
                     except Exception:
@@ -4243,6 +4268,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     return
                 bal = int(udata.get("total_exp", 0))
                 if bal < HORSE_BET_COST:
+                    print(f"[HORSE] user={user_id} insufficient balance: {bal}")
                     try:
                         await q.answer(f"잔고 부족! (필요 {HORSE_BET_COST}, 보유 {bal}$WHAT)", show_alert=True)
                     except Exception:
@@ -4262,14 +4288,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         taken.add(chosen_horse)
         session["players"] = players
         session["taken_horses"] = taken
+        print(f"[HORSE] {display} picked {chosen_horse}. players={len(players)}")
+
+        try:
+            await q.answer(f"{chosen_horse} 선택 완료!")
+        except Exception:
+            pass
 
         status_text = _horse_session_status(session)
 
         if len(players) >= HORSE_MAX_PLAYERS:
             try:
                 await q.message.edit_text(status_text + "\n\n⏳ 모든 자리가 찼습니다! 경기를 시작합니다...")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[HORSE] edit_text full error: {e}")
 
             for job in context.job_queue.jobs():
                 if job.name and job.name == f"horse_timeout:{chat_id}":
@@ -4283,8 +4315,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             kb = _horse_pick_keyboard(chat_id, taken)
             try:
                 await q.message.edit_text(status_text, reply_markup=kb)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[HORSE] edit_text error: {e}")
 
         return
 
