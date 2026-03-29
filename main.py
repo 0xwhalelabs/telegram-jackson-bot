@@ -161,6 +161,7 @@ async def _run_horse_race(
     today = kst_date_str(dt)
 
     if len(players) < HORSE_MIN_PLAYERS:
+        opener_uid = session.get("opener")
         for uid_str, info in players.items():
             uid = int(uid_str)
             async with get_user_lock(chat_id, uid):
@@ -170,10 +171,9 @@ async def _run_horse_race(
                 refund = int(udata.get("total_exp", 0)) + HORSE_BET_COST
                 reset_fields: Dict[str, Any] = {
                     "total_exp": refund,
-                    "horse_race_date": None,
                     "last_seen": dt,
                 }
-                if uid == session.get("opener"):
+                if uid == opener_uid:
                     reset_fields["horse_open_date"] = None
                 uref.set(reset_fields, merge=True)
         try:
@@ -2097,8 +2097,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "- !월척확률: 낚시 드랍 확률표\n"
             "\n"
             "[경마]\n"
-            f"- !얼룩이덜룩이: 경마 개설 (하루 1회, 참가비 {HORSE_BET_COST}$WHAT)\n"
-            f"  최대 {HORSE_MAX_PLAYERS}명 참가, 각자 말 1마리 선택 (1분 제한)\n"
+            f"- !얼룩이덜룩이: 경마 개설 (개설 하루 1회, 참가비 {HORSE_BET_COST}$WHAT)\n"
+            f"  참가는 횟수 제한 없이 선착순! 최대 {HORSE_MAX_PLAYERS}명, 1분 제한\n"
             f"  {HORSE_MIN_PLAYERS}명 미만 시 무효/환불, 1등에게 강화방어권 지급\n"
             "\n"
             "[띱 이벤트]\n"
@@ -4259,13 +4259,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 uref = user_ref(db, chat_id, user_id)
                 snap = uref.get()
                 udata = snap.to_dict() if snap.exists else {}
-                if udata.get("horse_race_date") == today:
-                    print(f"[HORSE] user={user_id} already played today")
-                    try:
-                        await q.answer("오늘은 이미 경마에 참여하셨습니다.", show_alert=True)
-                    except Exception:
-                        pass
-                    return
                 bal = int(udata.get("total_exp", 0))
                 if bal < HORSE_BET_COST:
                     print(f"[HORSE] user={user_id} insufficient balance: {bal}")
@@ -4277,7 +4270,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 uref.set(
                     {
                         "total_exp": bal - HORSE_BET_COST,
-                        "horse_race_date": today,
                         "last_seen": dt,
                         "last_active_date": today,
                     },
