@@ -64,44 +64,209 @@ LOTTO_DRAW_HOUR = 21              # 추첨 시각 (KST, 21시=오후 9시)
 
 HORSE_NAMES: List[str] = ["얼룩이", "덜룩이", "얼렁이", "덜렁이", "얼탱이", "덜탱이"]
 HORSE_BET_COST = 50
+HORSE_JOIN_TIMEOUT = 60           # 말 선택 제한 시간 (초)
+HORSE_MIN_PLAYERS = 2             # 최소 참가 인원 (미만이면 무효)
+HORSE_MAX_PLAYERS = 6             # 최대 참가 인원
 
-HORSE_COMMENTARY_TEMPLATES: List[List[str]] = [
+# 채팅방별 진행 중인 경마 세션
+# {chat_id: {"opener": int, "players": {user_id: {"horse": str, "display": str}},
+#             "taken_horses": set(), "message_id": int, "started_at": datetime}}
+_HORSE_SESSIONS: Dict[int, Dict[str, Any]] = {}
+
+# 멀티 메시지 경마 실황 템플릿 (각 템플릿은 메시지 리스트)
+# {horses}: 참가 말 목록, {h1}~{h6}: 순위별 말, {winner}: 우승마
+HORSE_RACE_TEMPLATES: List[List[str]] = [
     [
-        "출발선에 말들이 섰습니다! 긴장감이 감돕니다...",
-        "말들이 일제히 출발합니다! {h1}이(가) 초반 선두를 달립니다!",
-        "중반에 접어들며 {h2}이(가) 무서운 기세로 추격합니다!",
-        "마지막 직선코스! {h3}이(가) 놀라운 스퍼트를 보여줍니다!",
-        "결승선 통과!! 최종 우승마는... 🏆 {winner}!! 🏆",
+        "🏇 경기 시작! 출발선에 말들이 일렬로 섰습니다!",
+        "탕! 출발 신호와 함께 {h1}이(가) 로켓 스타트! 먼지를 날리며 앞서 나갑니다!",
+        "이런! {h1}이(가) 갑자기 발을 헛디뎠습니다! {h2}이(가) 그 틈을 놓치지 않고 추월!",
+        "코너를 도는 순간! {h3}이(가) 안쪽 라인을 파고들며 무서운 기세로 치고 올라옵니다!",
+        "마지막 직선코스! 모든 말이 전력질주! 관중석이 들썩입니다!",
+        "결승선 통과!! 🏆",
     ],
     [
-        "경마장에 함성이 울려퍼집니다! 레이스 시작!",
-        "{h1}이(가) 빠른 출발! 하지만 {h2}도 만만치 않습니다!",
-        "코너를 돌며 {h3}이(가) 안쪽으로 파고듭니다!",
-        "치열한 접전! 말들이 엎치락뒤치락 합니다!",
-        "피니시 라인! 우승마는... 🏆 {winner}!! 🏆",
+        "🏇 경마장에 긴장감이 감돕니다... 곧 출발입니다!",
+        "게이트 오픈! {h2}이(가) 폭발적인 출발! {h1}이(가) 바짝 뒤쫓습니다!",
+        "반환점을 지나며 {h3}이(가) 놀라운 가속력을 보여줍니다! 순식간에 3마리가 나란히!",
+        "{h1}이(가) 체력이 떨어지는 모습! 뒤에서 {h2}이(가) 서서히 밀려납니다!",
+        "숨막히는 데드히트! 결승선이 코앞입니다!",
+        "피니시 라인을 통과했습니다!! 🏆",
     ],
     [
-        "오늘의 경마가 시작됩니다! 과연 누가 우승할까요?",
-        "탕! 출발 신호와 함께 {h1}이(가) 로켓처럼 튀어나갑니다!",
-        "{h2}이(가) 뒤에서 서서히 속도를 올리고 있습니다!",
-        "막판 대역전! {h3}이(가) 모두를 제치고 앞으로!",
-        "레이스 종료! 오늘의 챔피언은... 🏆 {winner}!! 🏆",
+        "🏇 오늘의 경마가 시작됩니다! 과연 영광의 주인공은?!",
+        "출발! {h1}이(가) 펄쩍 뛰어나갑니다! 관중석에서 환호가 터집니다!",
+        "그런데! {h2}이(가) 넘어졌습니다! 아, 다행히 바로 일어나 다시 달립니다!",
+        "{h3}이(가) 묵묵히 페이스를 유지하며 앞으로 나아갑니다! 노련한 레이스!",
+        "막판 대역전극이 펼쳐지고 있습니다! 누가 이길지 아무도 모릅니다!",
+        "결승선!! 🏆",
     ],
     [
-        "먼지를 날리며 말들이 준비합니다! 곧 출발!",
-        "출발! {h1}이(가) 펄쩍 뛰어나갑니다! 관중석이 들썩입니다!",
-        "이런! {h2}이(가) 발을 헛디뎠지만 금세 회복합니다!",
-        "{h3}이(가) 무서운 저력을 보여주며 달려옵니다!",
-        "결과 발표! 영광의 우승마는... 🏆 {winner}!! 🏆",
+        "🏇 먼지를 날리며 말들이 준비합니다! 긴장이 최고조!",
+        "탕!! {h2}이(가) 빠른 출발! 하지만 {h1}도 만만치 않습니다!",
+        "중반전! {h1}이(가) 무리하게 달리다 속도가 줄어듭니다! {h3}이(가) 기회를 노립니다!",
+        "코너에서 {h3}이(가) 아찔한 추월! 관중들이 자리에서 벌떡 일어납니다!",
+        "최후의 스퍼트! 말들의 숨소리가 경마장에 울려퍼집니다!",
+        "레이스 종료!! 🏆",
     ],
     [
-        "해설자: 오늘도 뜨거운 경마가 펼쳐집니다!",
-        "게이트 오픈! {h1}이(가) 선두! {h2}이(가) 바짝 뒤쫓습니다!",
-        "반환점을 지나 {h3}이(가) 놀라운 가속력을 보여줍니다!",
-        "숨막히는 결승전! 모든 말들이 전력질주!",
-        "우승마 확정! 🏆 {winner}!! 🏆 축하합니다!",
+        "🏇 해설자: 신사숙녀 여러분! 오늘의 빅매치가 시작됩니다!",
+        "{h1}이(가) 선두로 출발! {h2}이(가) 맹추격합니다!",
+        "이게 무슨 일이죠?! {h1}이(가) 갑자기 옆으로 비틀거립니다! {h3}이(가) 단숨에 앞으로!",
+        "반환점! 아직 승부는 모릅니다! 뒤에서 무서운 추격이 이어지고 있습니다!",
+        "결승선 100m 전! 눈을 뗄 수 없는 접전이 펼쳐집니다!",
+        "골인!! 🏆",
+    ],
+    [
+        "🏇 경마의 신이 오늘도 관전하고 있습니다!",
+        "출발과 동시에 {h2}이(가) 미친듯이 달립니다! 나머지 말들이 당황한 모습!",
+        "하지만! {h1}이(가) 냉정하게 페이스를 끌어올립니다! 프로의 면모!",
+        "후반전 돌입! {h3}이(가) 숨겨둔 비장의 무기를 꺼냅니다! 폭풍 가속!",
+        "마지막 직선! 말들이 코 차이로 달리고 있습니다! 이건 사진 판독이 필요할지도!",
+        "판정 완료!! 🏆",
     ],
 ]
+
+
+def _horse_pick_keyboard(chat_id: int, taken: set) -> InlineKeyboardMarkup:
+    available = [h for h in HORSE_NAMES if h not in taken]
+    buttons = [
+        InlineKeyboardButton(text=h, callback_data=f"horse_pick:{chat_id}:{h}")
+        for h in available
+    ]
+    rows = []
+    for i in range(0, len(buttons), 3):
+        rows.append(buttons[i:i + 3])
+    return InlineKeyboardMarkup(rows)
+
+
+def _horse_session_status(session: Dict[str, Any]) -> str:
+    players = session.get("players", {})
+    lines = [f"🏇 얼룩이덜룩이 경마대회! ({len(players)}/{HORSE_MAX_PLAYERS}명 참가)"]
+    lines.append(f"참가비 {HORSE_BET_COST}$WHAT | 1등에게 강화방어권 지급!")
+    lines.append("")
+    for uid, info in players.items():
+        lines.append(f"  🐎 {info['horse']} — {info['display']}")
+    taken = session.get("taken_horses", set())
+    available = [h for h in HORSE_NAMES if h not in taken]
+    if available:
+        lines.append("")
+        lines.append(f"선택 가능: {', '.join(available)}")
+    return "\n".join(lines)
+
+
+async def _run_horse_race(
+    bot, chat_id: int, session: Dict[str, Any], db, dt: datetime
+) -> None:
+    players = session.get("players", {})
+    today = kst_date_str(dt)
+
+    if len(players) < HORSE_MIN_PLAYERS:
+        for uid_str, info in players.items():
+            uid = int(uid_str)
+            async with get_user_lock(chat_id, uid):
+                uref = user_ref(db, chat_id, uid)
+                snap = uref.get()
+                udata = snap.to_dict() if snap.exists else {}
+                refund = int(udata.get("total_exp", 0)) + HORSE_BET_COST
+                reset_fields: Dict[str, Any] = {
+                    "total_exp": refund,
+                    "horse_race_date": None,
+                    "last_seen": dt,
+                }
+                if uid == session.get("opener"):
+                    reset_fields["horse_open_date"] = None
+                uref.set(reset_fields, merge=True)
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"🏇 참가 인원이 {HORSE_MIN_PLAYERS}명 미만이라 경기가 무효됩니다.\n"
+                    f"참가비 {HORSE_BET_COST}$WHAT이 환불되었습니다."
+                ),
+            )
+        except Exception:
+            pass
+        return
+
+    racing_horses = [info["horse"] for info in players.values()]
+    random.shuffle(racing_horses)
+    result_order = list(racing_horses)
+
+    horse_to_uid: Dict[str, int] = {}
+    horse_to_display: Dict[str, str] = {}
+    for uid_str, info in players.items():
+        horse_to_uid[info["horse"]] = int(uid_str)
+        horse_to_display[info["horse"]] = info["display"]
+
+    filler_horses = [h for h in HORSE_NAMES if h not in set(racing_horses)]
+    random.shuffle(filler_horses)
+    h1 = result_order[-1] if len(result_order) >= 1 else filler_horses[0]
+    h2 = result_order[-2] if len(result_order) >= 2 else (filler_horses[0] if filler_horses else h1)
+    h3 = result_order[0] if len(result_order) >= 3 else (filler_horses[1] if len(filler_horses) >= 2 else h2)
+    winner = result_order[0]
+
+    template = random.choice(HORSE_RACE_TEMPLATES)
+    for i, line_tpl in enumerate(template):
+        line = line_tpl.format(h1=h1, h2=h2, h3=h3, winner=winner)
+        try:
+            await bot.send_message(chat_id=chat_id, text=line)
+        except Exception:
+            pass
+        if i < len(template) - 1:
+            await asyncio.sleep(2.5)
+
+    result_lines = ["📊 경기 결과"]
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣"]
+    for rank, horse in enumerate(result_order):
+        disp = horse_to_display.get(horse, "?")
+        medal = medals[rank] if rank < len(medals) else f"{rank + 1}등"
+        result_lines.append(f"{medal} {horse} ({disp})")
+
+    try:
+        await bot.send_message(chat_id=chat_id, text="\n".join(result_lines))
+    except Exception:
+        pass
+
+    winner_uid = horse_to_uid.get(winner)
+    if winner_uid is not None:
+        async with get_user_lock(chat_id, winner_uid):
+            uref = user_ref(db, chat_id, winner_uid)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            tickets_list, _ = defense_tickets_list_from_udata(udata, dt)
+            tickets_list.append(dt + timedelta(seconds=DEFENSE_TICKET_TTL_SECONDS))
+            tickets_list.sort()
+            uref.set(
+                {
+                    "defense_tickets_list": tickets_list,
+                    "defense_tickets": len(tickets_list),
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
+            )
+        winner_display = horse_to_display.get(winner, str(winner_uid))
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"🏆 {winner_display}님의 {winner}이(가) 1등! 강화 방어권 1장이 지급되었습니다!",
+            )
+        except Exception:
+            pass
+
+
+async def _horse_race_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data or {}
+    chat_id = int(data.get("chat_id", 0))
+    if not chat_id:
+        return
+    session = _HORSE_SESSIONS.pop(chat_id, None)
+    if session is None:
+        return
+
+    db = get_firebase_client()
+    dt = now_kst()
+    await _run_horse_race(context.bot, chat_id, session, db, dt)
 
 
 def get_chat_lock(chat_id: int) -> asyncio.Lock:
@@ -1336,38 +1501,68 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if text.strip() == "!얼룩이덜룩이":
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text("익명 관리자 모드에서는 경마에 참여할 수 없습니다.")
+            return
+
         user_id = int(update.effective_user.id)
         db = get_firebase_client()
         dt = now_kst()
         today = kst_date_str(dt)
+
+        if chat_id in _HORSE_SESSIONS:
+            await update.message.reply_text("이미 경마가 진행 중입니다! 말 선택 버튼을 눌러 참가하세요.")
+            return
+
         async with get_user_lock(chat_id, user_id):
             uref = user_ref(db, chat_id, user_id)
             snap = uref.get()
             udata = snap.to_dict() if snap.exists else {}
-            if udata.get("horse_race_date") == today:
-                await update.message.reply_text("오늘은 이미 경마에 참여하셨습니다. 내일 다시 도전하세요!")
+            if udata.get("horse_open_date") == today:
+                await update.message.reply_text("오늘은 이미 경마를 개설하셨습니다. 내일 다시 도전하세요!")
                 return
             bal = int(udata.get("total_exp", 0))
             if bal < HORSE_BET_COST:
                 await update.message.reply_text(f"잔고가 부족합니다. (필요 {HORSE_BET_COST}$WHAT, 보유 {bal}$WHAT)")
                 return
-            uref.set({"total_exp": bal - HORSE_BET_COST, "last_seen": dt}, merge=True)
-
-        winner_horse = random.choice(HORSE_NAMES)
-        buttons = []
-        for name in HORSE_NAMES:
-            buttons.append(
-                InlineKeyboardButton(
-                    text=name,
-                    callback_data=f"horse_bet:{chat_id}:{user_id}:{name}:{winner_horse}",
-                )
+            uref.set(
+                {
+                    "total_exp": bal - HORSE_BET_COST,
+                    "horse_open_date": today,
+                    "horse_race_date": today,
+                    "last_seen": dt,
+                    "last_active_date": today,
+                },
+                merge=True,
             )
-        kb = InlineKeyboardMarkup([buttons[:3], buttons[3:]])
-        await update.message.reply_text(
-            f"🏇 얼룩이덜룩이 경마대회! 🏇\n"
-            f"참가비 {HORSE_BET_COST}$WHAT이 차감되었습니다.\n"
-            f"6마리 말 중 강화 방어권을 가진 말을 골라주세요!",
-            reply_markup=kb,
+
+        username = update.effective_user.username
+        display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+
+        _HORSE_SESSIONS[chat_id] = {
+            "opener": user_id,
+            "players": {},
+            "taken_horses": set(),
+            "started_at": dt,
+        }
+
+        kb = _horse_pick_keyboard(chat_id, set())
+        status_text = (
+            f"🏇 얼룩이덜룩이 경마대회 개설! 🏇\n\n"
+            f"개설자: {display} (참가비 {HORSE_BET_COST}$WHAT 차감됨)\n"
+            f"최대 {HORSE_MAX_PLAYERS}명 참가 가능 | 1분 내 말을 선택하세요!\n\n"
+            f"말을 선택하면 자동으로 참가 (참가비 {HORSE_BET_COST}$WHAT)\n"
+            f"개설자도 말을 선택해야 참가됩니다!\n\n"
+            f"선택 가능: {', '.join(HORSE_NAMES)}"
+        )
+        msg = await update.message.reply_text(status_text, reply_markup=kb)
+        _HORSE_SESSIONS[chat_id]["message_id"] = msg.message_id
+
+        context.job_queue.run_once(
+            _horse_race_timeout_job,
+            when=HORSE_JOIN_TIMEOUT,
+            name=f"horse_timeout:{chat_id}",
+            data={"chat_id": chat_id},
         )
         return
 
@@ -1902,8 +2097,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "- !월척확률: 낚시 드랍 확률표\n"
             "\n"
             "[경마]\n"
-            "- !얼룩이덜룩이: 경마 미니게임 (하루 1회, 참가비 50$WHAT)\n"
-            "  6마리 말 중 강화 방어권을 가진 말을 맞추면 획득!\n"
+            f"- !얼룩이덜룩이: 경마 개설 (하루 1회, 참가비 {HORSE_BET_COST}$WHAT)\n"
+            f"  최대 {HORSE_MAX_PLAYERS}명 참가, 각자 말 1마리 선택 (1분 제한)\n"
+            f"  {HORSE_MIN_PLAYERS}명 미만 시 무효/환불, 1등에게 강화방어권 지급\n"
             "\n"
             "[띱 이벤트]\n"
             "- 봇이 랜덤 시간에 !띱을 외치면 가장 먼저 !띱을 친 유저가\n"
@@ -3978,75 +4174,118 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
         return
 
-    if data.startswith("horse_bet:"):
+    if data.startswith("horse_pick:"):
         parts = data.split(":")
-        if len(parts) != 5:
+        if len(parts) != 3:
             return
-        _, cid, uid, chosen, winner = parts
+        _, cid, chosen_horse = parts
         if int(cid) != chat_id:
             return
-        if q.from_user is None or int(q.from_user.id) != int(uid):
+        if chosen_horse not in HORSE_NAMES:
+            return
+
+        session = _HORSE_SESSIONS.get(chat_id)
+        if session is None:
             try:
-                await q.answer("본인만 선택할 수 있습니다.", show_alert=True)
+                await q.answer("현재 진행 중인 경마가 없습니다.", show_alert=True)
             except Exception:
-                return
-            return
-        if chosen not in HORSE_NAMES or winner not in HORSE_NAMES:
+                pass
             return
 
-        user_id = int(uid)
-        db = get_firebase_client()
-        dt = now_kst()
-        today = kst_date_str(dt)
+        if q.from_user is None:
+            return
+        user_id = int(q.from_user.id)
+        username = q.from_user.username
+        display = f"@{username}" if username else (q.from_user.full_name or str(user_id))
 
-        template = random.choice(HORSE_COMMENTARY_TEMPLATES)
-        others = [h for h in HORSE_NAMES if h != winner]
-        random.shuffle(others)
-        h1, h2, h3 = others[0], others[1], others[2]
+        players = session.get("players", {})
+        taken = session.get("taken_horses", set())
 
-        commentary_lines = []
-        for line in template:
-            commentary_lines.append(
-                line.format(h1=h1, h2=h2, h3=h3, winner=winner)
-            )
-        commentary = "\n".join(commentary_lines)
+        if str(user_id) in players:
+            try:
+                await q.answer(f"이미 {players[str(user_id)]['horse']}을(를) 선택하셨습니다.", show_alert=True)
+            except Exception:
+                pass
+            return
 
-        if chosen == winner:
+        if chosen_horse in taken:
+            available = [h for h in HORSE_NAMES if h not in taken]
+            try:
+                await q.answer(
+                    f"{chosen_horse}은(는) 이미 선점되었습니다. 선택 가능: {', '.join(available)}",
+                    show_alert=True,
+                )
+            except Exception:
+                pass
+            return
+
+        if len(players) >= HORSE_MAX_PLAYERS:
+            try:
+                await q.answer("참가 인원이 가득 찼습니다.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        opener_id = session.get("opener")
+        if user_id != opener_id:
+            db = get_firebase_client()
+            dt = now_kst()
+            today = kst_date_str(dt)
             async with get_user_lock(chat_id, user_id):
                 uref = user_ref(db, chat_id, user_id)
                 snap = uref.get()
                 udata = snap.to_dict() if snap.exists else {}
-                tickets_list, _ = defense_tickets_list_from_udata(udata, dt)
-                tickets_list.append(dt + timedelta(seconds=DEFENSE_TICKET_TTL_SECONDS))
-                tickets_list.sort()
+                if udata.get("horse_race_date") == today:
+                    try:
+                        await q.answer("오늘은 이미 경마에 참여하셨습니다.", show_alert=True)
+                    except Exception:
+                        pass
+                    return
+                bal = int(udata.get("total_exp", 0))
+                if bal < HORSE_BET_COST:
+                    try:
+                        await q.answer(f"잔고 부족! (필요 {HORSE_BET_COST}, 보유 {bal}$WHAT)", show_alert=True)
+                    except Exception:
+                        pass
+                    return
                 uref.set(
                     {
-                        "defense_tickets_list": tickets_list,
-                        "defense_tickets": len(tickets_list),
+                        "total_exp": bal - HORSE_BET_COST,
                         "horse_race_date": today,
                         "last_seen": dt,
+                        "last_active_date": today,
                     },
                     merge=True,
                 )
-            result_text = (
-                f"{commentary}\n\n"
-                f"🎉 축하합니다! {chosen}을(를) 선택하여 적중!\n"
-                f"강화 방어권 1장을 획득했습니다! (현재 {len(tickets_list)}장)"
-            )
-        else:
-            async with get_user_lock(chat_id, user_id):
-                uref = user_ref(db, chat_id, user_id)
-                uref.set({"horse_race_date": today, "last_seen": dt}, merge=True)
-            result_text = (
-                f"{commentary}\n\n"
-                f"😢 아쉽게도 {chosen}은(는) 우승마가 아니었습니다.\n"
-                f"강화 방어권은 {winner}에게 있었습니다! 내일 다시 도전하세요!"
-            )
 
-        try:
-            await q.message.edit_text(result_text)
-        except Exception:
-            pass
+        players[str(user_id)] = {"horse": chosen_horse, "display": display}
+        taken.add(chosen_horse)
+        session["players"] = players
+        session["taken_horses"] = taken
+
+        status_text = _horse_session_status(session)
+
+        if len(players) >= HORSE_MAX_PLAYERS:
+            try:
+                await q.message.edit_text(status_text + "\n\n⏳ 모든 자리가 찼습니다! 경기를 시작합니다...")
+            except Exception:
+                pass
+
+            for job in context.job_queue.jobs():
+                if job.name and job.name == f"horse_timeout:{chat_id}":
+                    job.schedule_removal()
+
+            _HORSE_SESSIONS.pop(chat_id, None)
+            db2 = get_firebase_client()
+            dt2 = now_kst()
+            await _run_horse_race(context.bot, chat_id, session, db2, dt2)
+        else:
+            kb = _horse_pick_keyboard(chat_id, taken)
+            try:
+                await q.message.edit_text(status_text, reply_markup=kb)
+            except Exception:
+                pass
+
         return
 
     if data.startswith("yacha_accept:"):
