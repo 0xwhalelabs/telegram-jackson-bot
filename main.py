@@ -4071,14 +4071,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 total = p * cnt
                 fish_inv.pop(sell_name, None)
                 prev_total = int(udata.get("total_exp", 0))
-                uref.set(
+                uref.update(
                     {
                         "total_exp": prev_total + total,
-                        "fish_inventory": fish_inv,
+                        f"fish_inventory.{sell_name}": firestore.DELETE_FIELD,
                         "last_seen": dt,
                         "last_active_date": today,
-                    },
-                    merge=True,
+                    }
                 )
 
         try:
