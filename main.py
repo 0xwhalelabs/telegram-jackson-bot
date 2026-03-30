@@ -1616,23 +1616,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
 
-        username = update.effective_user.username
-        display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
-
-        db = get_firebase_client()
-        res = await _buy_lotto_ticket(db, chat_id, user_id, username, display, dt)
-
-        if not res.get("ok"):
-            await update.message.reply_text(str(res.get("msg", "복권 구매에 실패했습니다.")))
-            return
-
+        buttons = [
+            InlineKeyboardButton(
+                text=f"{n}장",
+                callback_data=f"lotto_buy:{chat_id}:{user_id}:{n}",
+            )
+            for n in range(1, LOTTO_MAX_TICKETS_PER_DAY + 1)
+        ]
+        kb = InlineKeyboardMarkup([buttons])
         await update.message.reply_text(
-            f"🎰 복권 구매 완료!\n\n"
-            f"🔢 번호: {res['number']}\n"
-            f"💰 차감: {LOTTO_TICKET_PRICE}$WHAT (잔고: {res['balance']}$WHAT)\n"
-            f"🎫 남은 구매 가능: {res['remaining']}장\n"
-            f"💰 현재 상금 풀: {res['pool']}$WHAT\n\n"
-            f"추첨은 오후 {LOTTO_DRAW_HOUR - 12}시에 진행됩니다!"
+            f"🎰 복권 구매 — 몇 장 구매하시겠습니까?\n"
+            f"1장당 {LOTTO_TICKET_PRICE}$WHAT (최대 {LOTTO_MAX_TICKETS_PER_DAY}장/일)",
+            reply_markup=kb,
         )
         return
 
@@ -4175,6 +4170,68 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
         return
 
+    if data.startswith("lotto_buy:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, uid, cnt_str = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("본인만 구매할 수 있습니다.", show_alert=True)
+            except Exception:
+                pass
+            return
+        try:
+            buy_count = int(cnt_str)
+        except ValueError:
+            return
+        if buy_count < 1 or buy_count > LOTTO_MAX_TICKETS_PER_DAY:
+            return
+
+        user_id = int(uid)
+        dt = now_kst()
+
+        if not _is_lotto_sale_open(dt):
+            try:
+                await q.message.edit_text(
+                    f"복권 판매 시간이 아닙니다.\n"
+                    f"판매 시간: 오전 {LOTTO_SALE_START_HOUR}시 ~ 오후 {LOTTO_SALE_END_HOUR - 12}시"
+                )
+            except Exception:
+                pass
+            return
+
+        username = q.from_user.username
+        display = f"@{username}" if username else (q.from_user.full_name or str(user_id))
+
+        db = get_firebase_client()
+        res = await _buy_lotto_ticket(db, chat_id, user_id, username, display, dt, count=buy_count)
+
+        if not res.get("ok"):
+            try:
+                await q.message.edit_text(str(res.get("msg", "복권 구매에 실패했습니다.")))
+            except Exception:
+                pass
+            return
+
+        numbers = res["numbers"]
+        numbers_str = ", ".join(str(n) for n in numbers)
+        actual = res["count"]
+        try:
+            await q.message.edit_text(
+                f"🎰 복권 {actual}장 구매 완료!\n\n"
+                f"🔢 번호: [{numbers_str}]\n"
+                f"💰 차감: {res['total_cost']}$WHAT (잔고: {res['balance']}$WHAT)\n"
+                f"🎫 남은 구매 가능: {res['remaining']}장\n"
+                f"💰 현재 상금 풀: {res['pool']}$WHAT\n\n"
+                f"추첨은 오후 {LOTTO_DRAW_HOUR - 12}시에 진행됩니다!"
+            )
+        except Exception:
+            pass
+        return
+
     if data.startswith("horse_pick:"):
         parts = data.split(":")
         if len(parts) != 3:
@@ -5298,9 +5355,12 @@ def _is_lotto_sale_open(dt: datetime) -> bool:
 
 async def _buy_lotto_ticket(
     db: firestore.Client, chat_id: int, user_id: int, username: Optional[str],
-    display: str, dt: datetime,
+    display: str, dt: datetime, count: int = 1,
 ) -> Dict[str, Any]:
+    count = max(1, min(count, LOTTO_MAX_TICKETS_PER_DAY))
     today = kst_date_str(dt)
+    ticket_numbers: List[int] = []
+
     async with get_user_lock(int(chat_id), int(user_id)):
         uref = user_ref(db, int(chat_id), int(user_id))
         snap = uref.get()
@@ -5314,14 +5374,25 @@ async def _buy_lotto_ticket(
         if lotto_count >= LOTTO_MAX_TICKETS_PER_DAY:
             return {"ok": False, "msg": f"오늘 복권 구매 한도({LOTTO_MAX_TICKETS_PER_DAY}장)를 모두 사용했습니다."}
 
+        available = LOTTO_MAX_TICKETS_PER_DAY - lotto_count
+        actual_count = min(count, available)
+
         total_exp = int(udata.get("total_exp", 0))
+        total_cost = LOTTO_TICKET_PRICE * actual_count
         if total_exp < LOTTO_TICKET_PRICE:
             return {"ok": False, "msg": f"잔고가 부족합니다. (필요 {LOTTO_TICKET_PRICE}$WHAT, 보유 {total_exp}$WHAT)"}
+        if total_exp < total_cost:
+            affordable = total_exp // LOTTO_TICKET_PRICE
+            if affordable < 1:
+                return {"ok": False, "msg": f"잔고가 부족합니다. (필요 {LOTTO_TICKET_PRICE}$WHAT, 보유 {total_exp}$WHAT)"}
+            actual_count = affordable
+            total_cost = LOTTO_TICKET_PRICE * actual_count
 
-        ticket_number = random.randint(LOTTO_NUMBER_MIN, LOTTO_NUMBER_MAX)
+        for _ in range(actual_count):
+            ticket_numbers.append(random.randint(LOTTO_NUMBER_MIN, LOTTO_NUMBER_MAX))
 
-        total_exp -= LOTTO_TICKET_PRICE
-        lotto_count += 1
+        total_exp -= total_cost
+        lotto_count += actual_count
 
         uref.set(
             {
@@ -5353,13 +5424,13 @@ async def _buy_lotto_ticket(
             lotto_pool = lotto_carryover
             lotto_tickets = {}
 
-        lotto_pool += LOTTO_TICKET_PRICE
+        lotto_pool += total_cost
 
         uid_key = str(int(user_id))
         user_tickets = lotto_tickets.get(uid_key)
         if not isinstance(user_tickets, list):
             user_tickets = []
-        user_tickets.append(ticket_number)
+        user_tickets.extend(ticket_numbers)
         lotto_tickets[uid_key] = user_tickets
 
         cref.set(
@@ -5376,7 +5447,9 @@ async def _buy_lotto_ticket(
     remaining = LOTTO_MAX_TICKETS_PER_DAY - lotto_count
     return {
         "ok": True,
-        "number": ticket_number,
+        "numbers": ticket_numbers,
+        "count": actual_count,
+        "total_cost": total_cost,
         "remaining": remaining,
         "pool": lotto_pool,
         "balance": total_exp,
