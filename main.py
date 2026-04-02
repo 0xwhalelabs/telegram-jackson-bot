@@ -164,6 +164,7 @@ async def _run_horse_race(
 ) -> None:
     players = session.get("players", {})
     today = kst_date_str(dt)
+    print(f"[HORSE-RACE] chat_id={chat_id} players={len(players)} min={HORSE_MIN_PLAYERS}")
 
     if len(players) < HORSE_MIN_PLAYERS:
         opener_uid = session.get("opener")
@@ -263,15 +264,24 @@ async def _run_horse_race(
 async def _horse_race_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data or {}
     chat_id = int(data.get("chat_id", 0))
+    print(f"[HORSE-TIMEOUT] fired for chat_id={chat_id}, sessions_keys={list(_HORSE_SESSIONS.keys())}")
     if not chat_id:
         return
     session = _HORSE_SESSIONS.pop(chat_id, None)
     if session is None:
+        print(f"[HORSE-TIMEOUT] session is None for chat_id={chat_id}, skipping")
         return
 
+    players = session.get("players", {})
+    print(f"[HORSE-TIMEOUT] chat_id={chat_id} players={len(players)} starting race...")
     db = get_firebase_client()
     dt = now_kst()
-    await _run_horse_race(context.bot, chat_id, session, db, dt)
+    try:
+        await _run_horse_race(context.bot, chat_id, session, db, dt)
+        print(f"[HORSE-TIMEOUT] race completed for chat_id={chat_id}")
+    except Exception as e:
+        print(f"[HORSE-TIMEOUT] _run_horse_race error: {e}")
+        import traceback; traceback.print_exc()
 
 
 def get_chat_lock(chat_id: int) -> asyncio.Lock:
