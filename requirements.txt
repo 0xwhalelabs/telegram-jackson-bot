@@ -1,4 +1,6 @@
 python-telegram-bot[job-queue]==21.6
 firebase-admin==6.5.0
 python-dotenv==1.0.1
- tzdata==2025.1
+tzdata==2025.1
+pillow
+aiohttp

@@ -176,13 +176,10 @@ async def _run_horse_race(
                 snap = uref.get()
                 udata = snap.to_dict() if snap.exists else {}
                 refund = int(udata.get("total_exp", 0)) + HORSE_BET_COST
-                reset_fields: Dict[str, Any] = {
+                uref.set({
                     "total_exp": refund,
                     "last_seen": dt,
-                }
-                if uid == opener_uid:
-                    reset_fields["horse_open_date"] = None
-                uref.set(reset_fields, merge=True)
+                }, merge=True)
         try:
             await bot.send_message(
                 chat_id=chat_id,
@@ -194,6 +191,15 @@ async def _run_horse_race(
         except Exception:
             pass
         return
+
+    # 경마 성립: opener의 horse_open_date 기록 (방장은 제외)
+    opener_uid = session.get("opener")
+    if opener_uid is not None:
+        is_opener_owner = (get_owner_user_id() is not None and opener_uid == get_owner_user_id())
+        if not is_opener_owner:
+            async with get_user_lock(chat_id, opener_uid):
+                oref = user_ref(db, chat_id, opener_uid)
+                oref.set({"horse_open_date": today}, merge=True)
 
     racing_horses = [info["horse"] for info in players.values()]
     random.shuffle(racing_horses)
@@ -1497,7 +1503,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             uref = user_ref(db, chat_id, user_id)
             snap = uref.get()
             udata = snap.to_dict() if snap.exists else {}
-            if udata.get("horse_open_date") == today:
+            is_bot_owner = (get_owner_user_id() is not None and user_id == get_owner_user_id())
+            if not is_bot_owner and udata.get("horse_open_date") == today:
                 await update.message.reply_text("오늘은 이미 경마를 개설하셨습니다. 내일 다시 도전하세요!")
                 return
             bal = int(udata.get("total_exp", 0))
@@ -1507,7 +1514,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             uref.set(
                 {
                     "total_exp": bal - HORSE_BET_COST,
-                    "horse_open_date": today,
                     "horse_race_date": today,
                     "last_seen": dt,
                     "last_active_date": today,

@@ -1,0 +1,5 @@
+.env
+agent_state.json
+supernova_agent.log
+__pycache__/
+*.pyc
