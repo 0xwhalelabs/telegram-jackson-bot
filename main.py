@@ -53,6 +53,10 @@ _LOTTERY_FIXED: Dict[int, Dict[int, str]] = {}
 
 _DDIP_ACTIVE: Dict[int, bool] = {}
 
+# 강화권 양도 대기 상태: {(chat_id, user_id): True}
+_DEFENSE_TRANSFER_PENDING: Dict[Tuple[int, int], bool] = {}
+DEFENSE_TRANSFER_REWARD = 300  # 양도 시 지급 $WHAT
+
 # ─── 복권 시스템 상수 ─────────────────────────────────────────
 LOTTO_TICKET_PRICE = 100          # 복권 1장 가격 ($WHAT)
 LOTTO_MAX_TICKETS_PER_DAY = 5     # 1인 하루 최대 구매 수
@@ -65,6 +69,7 @@ LOTTO_DRAW_HOUR = 21              # 추첨 시각 (KST, 21시=오후 9시)
 HORSE_NAMES: List[str] = ["얼룩이", "덜룩이", "얼렁이", "덜렁이", "얼탱이", "덜탱이"]
 HORSE_BET_COST = 50
 HORSE_JOIN_TIMEOUT = 60           # 말 선택 제한 시간 (초)
+HORSE_STALE_SECONDS = 120         # 세션이 이 시간 이상 지나면 자동 정리
 HORSE_MIN_PLAYERS = 2             # 최소 참가 인원 (미만이면 무효)
 HORSE_MAX_PLAYERS = 6             # 최대 참가 인원
 
@@ -362,26 +367,6 @@ def normalize_text(text: str) -> str:
 
 def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
-
-
-def mask_treasure_hint(cmd: str) -> str:
-    keep = set(["!", ","])
-    chars = list(cmd)
-    idxs = [i for i, ch in enumerate(chars) if ch not in keep]
-    if not idxs:
-        return cmd
-    reveal_cnt = max(1, int(round(len(idxs) * 0.35)))
-    reveal_cnt = min(reveal_cnt, len(idxs))
-    reveal = set(random.sample(idxs, reveal_cnt))
-    out: List[str] = []
-    for i, ch in enumerate(chars):
-        if ch in keep:
-            out.append(ch)
-        elif i in reveal:
-            out.append(ch)
-        else:
-            out.append("☆")
-    return "".join(out)
 
 
 def compute_level(total_exp: int) -> Tuple[int, int, int]:
@@ -1379,56 +1364,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if update.effective_chat.type == ChatType.PRIVATE:
         text = update.message.text
-        if text.strip().startswith("!보물추가"):
-            if not is_owner(update):
-                await update.message.reply_text("권한이 없습니다.")
-                return
-            allowed = get_allowed_chat_id()
-            if allowed is None:
-                await update.message.reply_text("설정된 채팅이 없습니다.")
-                return
-
-            parts = text.strip().split()
-            cmds = [p.strip() for p in parts[1:] if p.strip()]
-            if not cmds:
-                await update.message.reply_text("추가할 보물 명령어를 같이 입력해 주세요. 예) !보물추가 !사랑그리고평화")
-                return
-
-            for c in cmds:
-                if not c.startswith("!") or " " in c or len(c) < 2:
-                    await update.message.reply_text("보물 명령어는 공백 없이 !로 시작해야 합니다. 예) !사랑그리고평화")
-                    return
-
-            db = get_firebase_client()
-            dt = now_kst()
-            async with get_chat_lock(int(allowed)):
-                cref = chat_ref(db, int(allowed))
-                csnap = cref.get()
-                cdata = csnap.to_dict() if csnap.exists else {}
-                extra = cdata.get("extra_treasure_map")
-                if not isinstance(extra, dict):
-                    extra = {}
-                extra2 = dict(extra)
-                added = 0
-                skipped = 0
-                for c in cmds:
-                    if c in extra2:
-                        skipped += 1
-                        continue
-                    key = "extra_" + hashlib.md5(c.encode("utf-8")).hexdigest()[:12]
-                    extra2[c] = key
-                    added += 1
-                cref.set(
-                    {
-                        "chat_id": int(allowed),
-                        "extra_treasure_map": extra2,
-                        "last_seen": dt,
-                    },
-                    merge=True,
-                )
-            await update.message.reply_text(f"보물 추가 완료: {added}개 (중복 스킵 {skipped}개)")
-            return
-
         if text.strip().startswith("!추첨고정"):
             if not is_owner(update):
                 await update.message.reply_text("권한이 없습니다.")
@@ -1511,8 +1446,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         today = kst_date_str(dt)
 
         if chat_id in _HORSE_SESSIONS:
-            await update.message.reply_text("이미 경마가 진행 중입니다! 말 선택 버튼을 눌러 참가하세요.")
-            return
+            old_session = _HORSE_SESSIONS[chat_id]
+            elapsed = (dt - old_session.get("started_at", dt)).total_seconds()
+            if elapsed < HORSE_STALE_SECONDS:
+                await update.message.reply_text("이미 경마가 진행 중입니다! 말 선택 버튼을 눌러 참가하세요.")
+                return
+            _HORSE_SESSIONS.pop(chat_id, None)
+            for job in context.job_queue.jobs():
+                if job.name and job.name == f"horse_timeout:{chat_id}":
+                    job.schedule_removal()
 
         async with get_user_lock(chat_id, user_id):
             uref = user_ref(db, chat_id, user_id)
@@ -1782,192 +1724,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("\n".join(lines))
             return
 
-    treasure_map: Dict[str, str] = {}
-
     db = get_firebase_client()
-    cref = chat_ref(db, chat_id)
-    csnap = cref.get()
-    cdata = csnap.to_dict() if csnap.exists else {}
-    extra = cdata.get("extra_treasure_map")
-    if isinstance(extra, dict):
-        for cmd, key in extra.items():
-            if not isinstance(cmd, str) or not cmd.strip().startswith("!"):
-                continue
-            if not isinstance(key, str) or not key.strip():
-                continue
-            treasure_map[cmd.strip()] = key.strip()
 
-    if text.strip() == "!남은보물":
-        dt = now_kst()
-        async with get_chat_lock(chat_id):
-            csnap = cref.get()
-            cdata = csnap.to_dict() if csnap.exists else {}
-            found = cdata.get("treasures_found_global")
-            if not isinstance(found, dict):
-                found = {}
-            total_cnt = len(set(treasure_map.values()))
-            found_cnt = 0
-            for k in set(treasure_map.values()):
-                if found.get(k):
-                    found_cnt += 1
-            remaining = max(0, total_cnt - found_cnt)
-            cref.set(
-                {
-                    "chat_id": chat_id,
-                    "last_seen": dt,
-                },
-                merge=True,
-            )
-        await update.message.reply_text(f"아직 숨겨져있는 보물은 총 {remaining}개 입니다.")
-        return
-
-    if text.strip() == "!보물초기화":
-        if not is_owner(update):
-            await update.message.reply_text("권한이 없습니다.")
-            return
-        allowed = get_allowed_chat_id()
-        if allowed is not None and int(allowed) != int(chat_id):
-            return
-        async with get_chat_lock(chat_id):
-            cref2 = chat_ref(db, chat_id)
-            try:
-                cref2.update({
-                    "extra_treasure_map": firestore.DELETE_FIELD,
-                    "treasures_found_global": firestore.DELETE_FIELD,
-                    "treasure_daily_date": firestore.DELETE_FIELD,
-                    "treasure_daily_pool_index": firestore.DELETE_FIELD,
-                })
-            except Exception:
-                cref2.set({
-                    "extra_treasure_map": {},
-                    "treasures_found_global": {},
-                }, merge=True)
-        await update.message.reply_text("모든 보물 데이터가 초기화되었습니다. 수동으로 채워넣으세요.")
-        return
-
-    if text.strip() == "!보물해금":
-        if not is_owner(update):
-            await update.message.reply_text("권한이 없습니다.")
-            return
-
-        allowed = get_allowed_chat_id()
-        if allowed is not None and int(allowed) != int(chat_id):
-            return
-
-        db = get_firebase_client()
-        dt = now_kst()
-        changed = await _refresh_daily_treasures(db, int(chat_id), dt, force=True)
-        if not changed:
-            await update.message.reply_text("이미 오늘의 보물이 준비되어 있습니다.")
-            return
-        await update.message.reply_text("보물 5개를 해금했습니다.")
-        return
-
-    if text.strip() == "!보물힌트초기화":
-        if not is_owner(update):
-            await update.message.reply_text("권한이 없습니다.")
-            return
-
-        allowed = get_allowed_chat_id()
-        if allowed is not None and int(allowed) != int(chat_id):
-            return
-
-        db = get_firebase_client()
-        dt = now_kst()
-        today = kst_date_str(dt)
-
-        users = list(chat_ref(db, int(chat_id)).collection("users").stream())
-        cnt = 0
-        for d in users:
-            try:
-                uid = int(d.id)
-            except Exception:
-                continue
-            async with get_user_lock(int(chat_id), uid):
-                uref = user_ref(db, int(chat_id), uid)
-                uref.set(
-                    {
-                        "treasure_hint_date": today,
-                        "treasure_hint_uses_today": 0,
-                        "last_seen": dt,
-                    },
-                    merge=True,
-                )
-                cnt += 1
-
-        await update.message.reply_text(f"보물힌트 횟수 초기화 완료 (대상 {cnt}명)")
-        return
-
-    if text.strip() in ("!보물힌트", "!ㅎㅌ"):
-        user_id = int(update.effective_user.id)
-        dt = now_kst()
-        today = kst_date_str(dt)
-
-        async with get_user_lock(chat_id, user_id):
-            uref = user_ref(db, chat_id, user_id)
-            snap0 = uref.get()
-            udata0 = snap0.to_dict() if snap0.exists else {}
-
-            hint_date = udata0.get("treasure_hint_date")
-            hint_uses = int(udata0.get("treasure_hint_uses_today", 0))
-            if hint_date != today:
-                hint_date = today
-                hint_uses = 0
-
-            charge = 0
-            if hint_uses >= 2:
-                charge = 80
-                total_exp0 = int(udata0.get("total_exp", 0))
-                if total_exp0 < charge:
-                    await update.message.reply_text(
-                        f"잔고가 부족합니다. (필요 {charge}$WHAT, 보유 {total_exp0}$WHAT)"
-                    )
-                    return
-                uref.set({"total_exp": total_exp0 - charge}, merge=True)
-
-            hint_uses += 1
-
-            uref.set(
-                {
-                    "last_seen": dt,
-                    "last_active_date": today,
-                    "treasure_hint_date": hint_date,
-                    "treasure_hint_uses_today": hint_uses,
-                },
-                merge=True,
-            )
-
-        async with get_chat_lock(chat_id):
-            cref = chat_ref(db, chat_id)
-            csnap = cref.get()
-            cdata = csnap.to_dict() if csnap.exists else {}
-            found = cdata.get("treasures_found_global")
-            if not isinstance(found, dict):
-                found = {}
-            remaining_cmds: List[str] = []
-            for cmd, key in treasure_map.items():
-                if not found.get(key):
-                    remaining_cmds.append(cmd)
-            cref.set(
-                {
-                    "chat_id": chat_id,
-                    "last_seen": dt,
-                },
-                merge=True,
-            )
-
-        if not remaining_cmds:
-            await update.message.reply_text("남은 보물이 없습니다.")
-            return
-        pick = random.choice(remaining_cmds)
-        hint = mask_treasure_hint(pick)
-        suffix = ""
-        if hint_uses > 2:
-            suffix = " (80$WHAT 차감)"
-        await update.message.reply_text(f"남은 보물의 명령어는 {hint} 입니다.{suffix}")
-        return
-    tkey = treasure_map.get(text.strip())
-    if tkey is not None:
+    # ─── 강화권 양도 ─────────────────────────────────────────────
+    if text.strip() == "!강화권양도":
         if is_anonymous_admin_message(update):
             await update.message.reply_text(
                 "익명 관리자 모드로 보낸 메시지라 유저 식별이 불가능합니다.\n"
@@ -1976,47 +1736,104 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         user_id = int(update.effective_user.id)
         dt = now_kst()
-        today = kst_date_str(dt)
-
-        async with get_chat_lock(chat_id):
-            cref = chat_ref(db, chat_id)
-            csnap = cref.get()
-            cdata = csnap.to_dict() if csnap.exists else {}
-            found = cdata.get("treasures_found_global")
-            if not isinstance(found, dict):
-                found = {}
-            if found.get(tkey):
-                await update.message.reply_text(
-                    "해당 보물은 이미 비열한 파수꾼이 찾아감 ㄹㅇㅋㅋ 아쉽ㄲㅂㄲㅂ 스트레스 받을거야"
-                )
-                return
-            found2 = dict(found)
-            found2[tkey] = True
-            cref.set(
-                {
-                    "chat_id": chat_id,
-                    "treasures_found_global": found2,
-                    "last_seen": dt,
-                },
-                merge=True,
-            )
-
         async with get_user_lock(chat_id, user_id):
             uref = user_ref(db, chat_id, user_id)
-            usnap = uref.get()
-            udata = usnap.to_dict() if usnap.exists else {}
-            total_exp = int(udata.get("total_exp", 0)) + TREASURE_REWARD_EXP
-            uref.set(
-                {
-                    "total_exp": total_exp,
-                    "last_seen": dt,
-                    "last_active_date": today,
-                },
-                merge=True,
-            )
-
-        await update.message.reply_text(f"숨은 보물찾기에 성공하였습니다. ({TREASURE_REWARD_EXP}$WHAT 획득)")
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            tickets_list, t_changed = defense_tickets_list_from_udata(udata, dt)
+            tickets = len(tickets_list)
+            if t_changed:
+                uref.set(
+                    {
+                        "defense_tickets_list": tickets_list,
+                        "defense_tickets": tickets,
+                        "last_seen": dt,
+                    },
+                    merge=True,
+                )
+        if tickets < 1:
+            await update.message.reply_text("양도할 강화 방어권이 없습니다.")
+            return
+        _DEFENSE_TRANSFER_PENDING[(chat_id, user_id)] = True
+        await update.message.reply_text(
+            f"현재 보유 강화 방어권: {tickets}장\n"
+            "누구에게 양도하시겠습니까?\n"
+            "예: @username\n\n"
+            "취소하려면 !양도취소 를 입력하세요."
+        )
         return
+
+    if text.strip() == "!양도취소":
+        user_id = int(update.effective_user.id)
+        if _DEFENSE_TRANSFER_PENDING.pop((chat_id, user_id), None):
+            await update.message.reply_text("강화권 양도가 취소되었습니다.")
+        return
+
+    if text.strip().startswith("@") and not text.strip().startswith("@@"):
+        user_id = int(update.effective_user.id)
+        if _DEFENSE_TRANSFER_PENDING.get((chat_id, user_id)):
+            _DEFENSE_TRANSFER_PENDING.pop((chat_id, user_id), None)
+            target_uname = _normalize_username(text.strip().split()[0])
+            if not target_uname:
+                await update.message.reply_text("올바른 유저네임을 입력해주세요. (예: @username)")
+                return
+            sender_uname = update.effective_user.username
+            if sender_uname and _normalize_username(sender_uname) == target_uname:
+                await update.message.reply_text("자기 자신에게는 양도할 수 없습니다.")
+                return
+            target_doc = _find_user_doc_by_username(db, chat_id, target_uname)
+            if target_doc is None:
+                await update.message.reply_text(f"@{target_uname} 유저를 찾을 수 없습니다.")
+                return
+            target_uid = int(target_doc.id)
+            dt = now_kst()
+            today = kst_date_str(dt)
+
+            # 보내는 사람: 방어권 1장 차감, 300 WHAT 지급
+            async with get_user_lock(chat_id, user_id):
+                uref = user_ref(db, chat_id, user_id)
+                snap = uref.get()
+                udata = snap.to_dict() if snap.exists else {}
+                tickets_list, _ = defense_tickets_list_from_udata(udata, dt)
+                if len(tickets_list) < 1:
+                    await update.message.reply_text("양도할 강화 방어권이 없습니다.")
+                    return
+                tickets_list = tickets_list[1:]
+                sender_total = int(udata.get("total_exp", 0)) + DEFENSE_TRANSFER_REWARD
+                uref.set(
+                    {
+                        "defense_tickets_list": tickets_list,
+                        "defense_tickets": len(tickets_list),
+                        "total_exp": sender_total,
+                        "last_seen": dt,
+                        "last_active_date": today,
+                    },
+                    merge=True,
+                )
+
+            # 받는 사람: 방어권 1장 추가
+            async with get_user_lock(chat_id, target_uid):
+                t_uref = user_ref(db, chat_id, target_uid)
+                t_snap = t_uref.get()
+                t_udata = t_snap.to_dict() if t_snap.exists else {}
+                t_tickets_list, _ = defense_tickets_list_from_udata(t_udata, dt)
+                t_tickets_list.append(dt + timedelta(seconds=DEFENSE_TICKET_TTL_SECONDS))
+                t_tickets_list.sort()
+                t_uref.set(
+                    {
+                        "defense_tickets_list": t_tickets_list,
+                        "defense_tickets": len(t_tickets_list),
+                        "last_seen": dt,
+                    },
+                    merge=True,
+                )
+
+            sender_display = f"@{sender_uname}" if sender_uname else (update.effective_user.full_name or str(user_id))
+            await update.message.reply_text(
+                f"💝 {sender_display}님이 @{target_uname}님에게 강화 방어권 1장을 양도했습니다!\n"
+                f"착한 마음을 가진 자에게 {DEFENSE_TRANSFER_REWARD}$WHAT를 지급합니다."
+            )
+            return
 
     if text.strip() == "!존스미스불러":
         await update.message.reply_text("@smithjohnyeah")
@@ -2073,10 +1890,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "- !덤벼고래: 방장에게만 도전 가능한 가위바위보\n"
             "  (하루 2회, 이기면 방장 $WHAT에서 최대 50$WHAT 획득)\n"
             "\n"
-            "[보물]\n"
-            "- !남은보물: 남은 보물 개수 확인\n"
-            "- !보물힌트 (또는 !ㅎㅌ): 남은 보물 중 랜덤 힌트\n"
-            "\n"
             "[검 키우기]\n"
             "- !인벤토리: 현재 검/방어티켓 확인\n"
             "- !강화확률: 강화 단계별 비용/확률/판매가 확인\n"
@@ -2084,6 +1897,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "- !당근마켓: 검/물고기 판매(버튼)\n"
             f"- !베이스드몰: 검 구매({BASED_MALL_PRICE_EXP}$WHAT, 검이 없을 때만 가능)\n"
             "- !강화비용: 강화 비용/판매가\n"
+            f"- !강화권양도: 강화 방어권 1장을 다른 유저에게 양도 ({DEFENSE_TRANSFER_REWARD}$WHAT 보상)\n"
             "\n"
             "[낚시]\n"
             "- !낚시: 낚시 1회 진행(하루 횟수 제한)\n"
@@ -3655,134 +3469,6 @@ async def _handle_message_locked(update: Update, context: ContextTypes.DEFAULT_T
     )
 
     return
-
-
-TREASURE_REWARD_EXP = 100
-
-
-TREASURE_DAILY_POOL: List[str] = [
-    "!소리에아이구배가터져게빛나여거덕인지도몰르구여기에나우드라이크헤이러탑원포더척원더라이크스테이션동네사람들",
-    "!맨정신이난젤싫어아무것도할수가없어",
-    "!아무일도없었다",
-    "!존스미스포츈의쌍권총난사",
-    "!사람들은모두변하나봐",
-    "!불꽃어리둥절원식",
-    "!시작이제일무서워미룬이",
-    "!존스미꾸라지한마리가온웅덩이를흐린다",
-    "!암쏘쏘뤼벗알라뷰다거짓말이야몰랐어이제야알았어",
-    "!피카츄라이츄파이리꼬츄",
-    "!그란데사이즈로말입니다",
-    "!베이스드는분명보여줄것이다",
-    "!아임파인땡큐앤쥬",
-    "!알러뷰3000",
-    "!존스미스가게이란사실을알고있는가",
-    "!이래도지랄저래도지랄",
-    "!베이스드많이사랑해주세요",
-    "!개리와기리리가두개그래서리쌍",
-    "!디지털골드는없었다",
-    "!아주입만열면그짓말이자동으로나와",
-    "!이뭔개소리야",
-    "!천사소녀네티",
-    "!해리포터와인피니티워",
-    "!거를타선이없다",
-    "!검은머리외국인",
-    "!상처를치료해줄사람어디없누",
-    "!젠장또이상혁이야",
-    "!엄그리고준투더식",
-    "!헤어지던밤찬바람이불었다",
-    "!왜또아픈상처에소금을뿌리십니까",
-]
-
-
-async def _refresh_daily_treasures(
-    db: firestore.Client, chat_id: int, dt: datetime, force: bool = False
-) -> bool:
-    if not TREASURE_DAILY_POOL:
-        return False
-
-    today = kst_date_str(dt)
-    async with get_chat_lock(int(chat_id)):
-        cref = chat_ref(db, int(chat_id))
-        csnap = cref.get()
-        cdata = csnap.to_dict() if csnap.exists else {}
-
-        if not force and cdata.get("treasure_daily_date") == today:
-            extra0 = cdata.get("extra_treasure_map")
-            if isinstance(extra0, dict) and len(extra0) == 5:
-                return False
-
-        idx = int(cdata.get("treasure_daily_pool_index", 0))
-        pool_len = len(TREASURE_DAILY_POOL)
-        idx = idx % pool_len
-
-        picked: List[str] = []
-        for i in range(5):
-            picked.append(TREASURE_DAILY_POOL[(idx + i) % pool_len])
-
-        extra2: Dict[str, str] = {}
-        for cmd in picked:
-            key = "daily_" + hashlib.md5(cmd.encode("utf-8")).hexdigest()[:12]
-            extra2[cmd] = key
-
-        try:
-            cref.update(
-                {
-                    "extra_treasure_map": firestore.DELETE_FIELD,
-                    "treasures_found_global": firestore.DELETE_FIELD,
-                }
-            )
-        except Exception:
-            pass
-
-        cref.set(
-            {
-                "chat_id": int(chat_id),
-                "extra_treasure_map": extra2,
-                "treasures_found_global": {},
-                "treasure_daily_pool_index": (idx + 5) % pool_len,
-                "treasure_daily_date": today,
-                "last_seen": dt,
-            },
-            merge=True,
-        )
-
-    return True
-
-
-async def treasure_daily_add_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    allowed = get_allowed_chat_id()
-    if allowed is None:
-        return
-    if not TREASURE_DAILY_POOL:
-        return
-
-    db = get_firebase_client()
-    dt = now_kst()
-
-    chat_id = int(allowed)
-    changed = await _refresh_daily_treasures(db, chat_id, dt)
-    if not changed:
-        return
-
-    try:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "00시 신규 보물 5개가 추가되었습니다. "
-                "보물은 각각 100$WHAT를 지급합니다"
-            ),
-        )
-    except Exception:
-        return
-
-
-async def treasure_startup_ensure_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    allowed = get_allowed_chat_id()
-    if allowed is None:
-        return
-    db = get_firebase_client()
-    dt = now_kst()
-    await _refresh_daily_treasures(db, int(allowed), dt)
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5725,10 +5411,8 @@ def main() -> None:
     from zoneinfo import ZoneInfo
  
     kst = ZoneInfo(KST_TZ)
-    application.job_queue.run_once(treasure_startup_ensure_job, when=0)
     application.job_queue.run_once(fish_market_daily_job, when=0)
     application.job_queue.run_once(_ddip_startup_job, when=5)
-    application.job_queue.run_daily(treasure_daily_add_job, time=time(0, 0, tzinfo=kst))
     application.job_queue.run_daily(fish_market_daily_job, time=time(0, 0, tzinfo=kst))
     application.job_queue.run_daily(_ddip_daily_schedule_job, time=time(0, 1, tzinfo=kst))
     application.job_queue.run_daily(lotto_draw_job, time=time(LOTTO_DRAW_HOUR, 0, tzinfo=kst))
