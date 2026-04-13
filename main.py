@@ -94,7 +94,7 @@ _FUTURES_SESSIONS: Dict[int, Dict[str, Any]] = {}
 
 def _fetch_binance_price(symbol: str = FUTURES_BINANCE_SYMBOL) -> Optional[float]:
     """바이낸스에서 실시간 가격 조회"""
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+    url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
