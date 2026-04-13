@@ -93,16 +93,29 @@ _FUTURES_SESSIONS: Dict[int, Dict[str, Any]] = {}
 
 
 def _fetch_binance_price(symbol: str = FUTURES_BINANCE_SYMBOL) -> Optional[float]:
-    """바이낸스에서 실시간 가격 조회"""
-    url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-            return float(data["price"])
-    except Exception as e:
-        print(f"[FUTURES] Binance price fetch error: {e}")
-        return None
+    """여러 소스에서 순차적으로 가격 조회 (Binance Futures -> Binance Spot -> CoinGecko)"""
+    sources = [
+        (f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}", "binance_futures"),
+        (f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}", "binance_spot"),
+        ("https://api.coingecko.com/api/v3/simple/price?ids=based-one&vs_currencies=usd", "coingecko"),
+    ]
+    for url, source in sources:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                if source == "coingecko":
+                    price = float(data.get("based-one", {}).get("usd", 0))
+                else:
+                    price = float(data.get("price", 0))
+                if price > 0:
+                    print(f"[FUTURES] Price fetched from {source}: {price}")
+                    return price
+        except Exception as e:
+            print(f"[FUTURES] {source} error: {e}")
+            continue
+    print("[FUTURES] All price sources failed")
+    return None
 
 
 def _futures_session_status(session: Dict[str, Any], closed: bool = False) -> str:
