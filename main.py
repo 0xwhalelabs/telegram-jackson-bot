@@ -953,6 +953,12 @@ def _fishing_kb(chat_id: int, user_id: int, message_id: int, can_continue: bool)
                 callback_data=f"fish_cast:{int(chat_id)}:{int(user_id)}:{int(message_id)}",
             )
         )
+        row.append(
+            InlineKeyboardButton(
+                text="전부 던지기",
+                callback_data=f"fish_all:{int(chat_id)}:{int(user_id)}:{int(message_id)}",
+            )
+        )
     row.append(
         InlineKeyboardButton(
             text="끝내기",
@@ -4018,6 +4024,89 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 text,
                 reply_markup=_fishing_kb(chat_id, user_id, int(mid), can_continue=can_continue),
             )
+        except Exception:
+            pass
+        return
+
+    if data.startswith("fish_all:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            return
+        _, cid, uid, mid = parts
+        if int(cid) != chat_id:
+            return
+        if q.from_user is None or int(q.from_user.id) != int(uid):
+            try:
+                await q.answer("본인만 누를 수 있습니다.", show_alert=True)
+            except Exception:
+                return
+            return
+        if q.message is None or int(q.message.message_id) != int(mid):
+            return
+
+        user_id = int(uid)
+        if not is_fishing_active(chat_id, user_id):
+            try:
+                await q.answer("낚시가 종료되었습니다. 다시 !낚시로 시작하세요.", show_alert=True)
+            except Exception:
+                return
+            return
+
+        username = q.from_user.username if q.from_user else None
+        display = f"@{username}" if username else ((q.from_user.full_name if q.from_user else "") or str(user_id))
+
+        set_fishing_pending(chat_id, user_id, False)
+        fish_cancel_jobs(context, chat_id, user_id, int(mid))
+
+        try:
+            await q.message.edit_text(f"{display} 전부 던지는 중... 🎣")
+        except Exception:
+            pass
+
+        db = get_firebase_client()
+        total_value = 0
+        cast_count = 0
+        loot_summary: Dict[str, int] = {}
+        limit_total = 0
+
+        while True:
+            dt = now_kst()
+            res = await _do_fishing_cast(db, chat_id, user_id, username, display, dt)
+            if not bool(res.get("ok")):
+                break
+            cast_count += 1
+            loot_name = str(res.get("loot_name") or "")
+            loot_value = int(res.get("loot_value") or 0)
+            total_value += loot_value
+            remaining = int(res.get("remaining") or 0)
+            limit_total = int(res.get("limit") or 0)
+            if loot_name:
+                loot_summary[loot_name] = loot_summary.get(loot_name, 0) + 1
+            if remaining <= 0:
+                break
+
+        set_fishing_active(chat_id, user_id, False)
+        set_fishing_pending(chat_id, user_id, False)
+
+        if cast_count == 0:
+            try:
+                await q.message.edit_text(f"{display}님 낚시 가능 횟수가 남아있지 않습니다.")
+            except Exception:
+                pass
+            return
+
+        lines = [
+            f"🎣 {display} 전부 던지기 완료!",
+            f"총 {cast_count}회 낚시 | 총 가치: {total_value}$WHAT",
+            f"남은 횟수: 0/{limit_total}",
+            "",
+            "📦 획득 목록:",
+        ]
+        for name, count in sorted(loot_summary.items(), key=lambda x: -x[1]):
+            lines.append(f"  {name} x{count}")
+
+        try:
+            await q.message.edit_text("\n".join(lines))
         except Exception:
             pass
         return
