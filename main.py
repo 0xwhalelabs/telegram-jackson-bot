@@ -93,28 +93,18 @@ _FUTURES_SESSIONS: Dict[int, Dict[str, Any]] = {}
 
 
 def _fetch_binance_price(symbol: str = FUTURES_BINANCE_SYMBOL) -> Optional[float]:
-    """여러 소스에서 순차적으로 가격 조회 (Binance Futures -> Binance Spot -> CoinGecko)"""
-    sources = [
-        (f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}", "binance_futures"),
-        (f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}", "binance_spot"),
-        ("https://api.coingecko.com/api/v3/simple/price?ids=based-one&vs_currencies=usd", "coingecko"),
-    ]
-    for url, source in sources:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-                if source == "coingecko":
-                    price = float(data.get("based-one", {}).get("usd", 0))
-                else:
-                    price = float(data.get("price", 0))
-                if price > 0:
-                    print(f"[FUTURES] Price fetched from {source}: {price}")
-                    return price
-        except Exception as e:
-            print(f"[FUTURES] {source} error: {e}")
-            continue
-    print("[FUTURES] All price sources failed")
+    """CoinGecko에서 $BASED 가격 조회"""
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=based-one&vs_currencies=usd"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+            print(f"[FUTURES] CoinGecko response: {data}")
+            price = float(data.get("based-one", {}).get("usd", 0))
+            if price > 0:
+                return price
+    except Exception as e:
+        print(f"[FUTURES] CoinGecko error: {e}")
     return None
 
 
@@ -1803,10 +1793,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if job.name and job.name in (f"futures_close:{chat_id}", f"futures_settle:{chat_id}"):
                     job.schedule_removal()
 
-        # 바이낸스에서 현재 가격 조회
+        # 현재 가격 조회
         price = _fetch_binance_price()
         if price is None:
-            await update.message.reply_text("⚠️ 바이낸스에서 $BASED 가격을 조회할 수 없습니다. 잠시 후 다시 시도해주세요.")
+            await update.message.reply_text("⚠️ $BASED 가격을 조회할 수 없습니다. 잠시 후 다시 시도해주세요.")
             return
 
         username = update.effective_user.username
