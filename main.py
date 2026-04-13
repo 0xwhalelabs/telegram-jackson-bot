@@ -125,15 +125,21 @@ def _futures_session_status(session: Dict[str, Any], closed: bool = False, remai
     open_price = session.get("open_price", 0)
     longs = [(uid, p) for uid, p in players.items() if p["side"] == "long"]
     shorts = [(uid, p) for uid, p in players.items() if p["side"] == "short"]
+    long_total = sum(p["amount"] for _, p in longs)
+    short_total = sum(p["amount"] for _, p in shorts)
+    total_pool = long_total + short_total
+    long_odds = (total_pool / long_total) if long_total > 0 else 0
+    short_odds = (total_pool / short_total) if short_total > 0 else 0
     lines = [
         f"📈📉 $BASED 선물 게임!",
         f"기준가: ${open_price:.6f}",
+        f"💰 총 풀: {total_pool}$WHAT",
         "",
-        f"🟢 롱 ({len(longs)}명):",
+        f"🟢 롱 ({len(longs)}명) — 총 {long_total}$WHAT" + (f" | 배당 x{long_odds:.2f}" if long_total > 0 else ""),
     ]
     for uid, p in longs:
         lines.append(f"  {p['display']} — {p['amount']}$WHAT")
-    lines.append(f"🔴 숏 ({len(shorts)}명):")
+    lines.append(f"🔴 숏 ({len(shorts)}명) — 총 {short_total}$WHAT" + (f" | 배당 x{short_odds:.2f}" if short_total > 0 else ""))
     for uid, p in shorts:
         lines.append(f"  {p['display']} — {p['amount']}$WHAT")
     if not closed:
@@ -444,12 +450,19 @@ async def _futures_settle_countdown_job(context: ContextTypes.DEFAULT_TYPE) -> N
     players = session.get("players", {})
     longs = [p for p in players.values() if p["side"] == "long"]
     shorts = [p for p in players.values() if p["side"] == "short"]
+    long_total = sum(p["amount"] for p in longs)
+    short_total = sum(p["amount"] for p in shorts)
+    total_pool = long_total + short_total
+    long_odds_str = f"x{total_pool / long_total:.2f}" if long_total > 0 else "-"
+    short_odds_str = f"x{total_pool / short_total:.2f}" if short_total > 0 else "-"
     mins = remain // 60
     secs = remain % 60
     text = (
         f"🔒 선물 게임 참여가 마감되었습니다!\n"
         f"기준가: ${open_price:.6f}\n"
-        f"🟢 롱: {len(longs)}명 | 🔴 숏: {len(shorts)}명\n\n"
+        f"💰 총 풀: {total_pool}$WHAT\n"
+        f"🟢 롱: {len(longs)}명 ({long_total}$WHAT) 배당 {long_odds_str}\n"
+        f"🔴 숏: {len(shorts)}명 ({short_total}$WHAT) 배당 {short_odds_str}\n\n"
         f"⏳ 결과 발표까지: {mins}분 {secs}초"
     )
     settle_msg_id = session.get("settle_message_id")
@@ -502,13 +515,20 @@ async def _futures_close_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     open_price = session.get("open_price", 0)
     longs = [p for p in players.values() if p["side"] == "long"]
     shorts = [p for p in players.values() if p["side"] == "short"]
+    long_total = sum(p["amount"] for p in longs)
+    short_total = sum(p["amount"] for p in shorts)
+    total_pool = long_total + short_total
+    long_odds_str = f"x{total_pool / long_total:.2f}" if long_total > 0 else "-"
+    short_odds_str = f"x{total_pool / short_total:.2f}" if short_total > 0 else "-"
     try:
         settle_msg = await context.bot.send_message(
             chat_id=chat_id,
             text=(
                 f"🔒 선물 게임 참여가 마감되었습니다!\n"
                 f"기준가: ${open_price:.6f}\n"
-                f"🟢 롱: {len(longs)}명 | 🔴 숏: {len(shorts)}명\n\n"
+                f"💰 총 풀: {total_pool}$WHAT\n"
+                f"🟢 롱: {len(longs)}명 ({long_total}$WHAT) 배당 {long_odds_str}\n"
+                f"🔴 숏: {len(shorts)}명 ({short_total}$WHAT) 배당 {short_odds_str}\n\n"
                 f"⏳ 결과 발표까지: 2분 0초"
             ),
         )
@@ -595,24 +615,42 @@ async def _futures_settle_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             losers.append((uid_str, info))
 
+    # 총 풀 계산
+    total_pool = sum(info["amount"] for info in players.values())
+    winning_total = sum(info["amount"] for _, info in winners)
+
     db = get_firebase_client()
     dt = now_kst()
     today = kst_date_str(dt)
 
-    # 승자에게 2배 지급
-    for uid_str, info in winners:
+    # 역배 배분: 승자에게 풀을 베팅 비율대로 지급
+    payouts: Dict[str, int] = {}
+    if winning_side == "draw":
+        for uid_str, info in winners:
+            payouts[uid_str] = info["amount"]
+    else:
+        for uid_str, info in winners:
+            if winning_total > 0:
+                share = total_pool * (info["amount"] / winning_total)
+                payouts[uid_str] = int(share)
+            else:
+                payouts[uid_str] = info["amount"]
+
+    for uid_str, payout in payouts.items():
         uid = int(uid_str)
-        reward = info["amount"] * 2 if winning_side != "draw" else info["amount"]
         async with get_user_lock(chat_id, uid):
             uref = user_ref(db, chat_id, uid)
             snap = uref.get()
             udata = snap.to_dict() if snap.exists else {}
-            new_bal = int(udata.get("total_exp", 0)) + reward
+            new_bal = int(udata.get("total_exp", 0)) + payout
             uref.set({
                 "total_exp": new_bal,
                 "last_seen": dt,
                 "last_active_date": today,
             }, merge=True)
+
+    # 배당률
+    odds = (total_pool / winning_total) if winning_total > 0 else 0
 
     # 결과 텍스트
     change_pct = ((settle_price - open_price) / open_price * 100) if open_price else 0
@@ -622,22 +660,25 @@ async def _futures_settle_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         f"기준가: ${open_price:.6f}",
         f"결과가: ${settle_price:.6f} ({change_pct:+.2f}%)",
         f"{direction_text}",
+        f"💰 총 풀: {total_pool}$WHAT",
         f"",
     ]
     if winning_side == "draw":
         lines.append("무승부! 전원 베팅금이 환불됩니다.")
     else:
         side_emoji = "🟢 롱" if winning_side == "long" else "🔴 숏"
-        lines.append(f"🏆 {side_emoji} 승리!")
+        lines.append(f"🏆 {side_emoji} 승리! (배당 x{odds:.2f})")
         lines.append("")
         if winners:
             lines.append("💰 수익자:")
             for uid_str, info in winners:
-                lines.append(f"  {info['display']} +{info['amount']}$WHAT")
+                payout = payouts.get(uid_str, 0)
+                profit = payout - info["amount"]
+                lines.append(f"  {info['display']} — 베팅 {info['amount']} → 수령 {payout}$WHAT (+{profit})")
         if losers:
             lines.append("💸 손실자:")
             for uid_str, info in losers:
-                lines.append(f"  {info['display']} -{info['amount']}$WHAT")
+                lines.append(f"  {info['display']} — -{info['amount']}$WHAT")
 
     try:
         await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
