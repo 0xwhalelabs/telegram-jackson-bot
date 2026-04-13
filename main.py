@@ -1995,6 +1995,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if text.strip() == "!선물종료":
+        if not is_owner(update):
+            await update.message.reply_text("방장만 사용할 수 있는 명령어입니다.")
+            return
+        session = _FUTURES_SESSIONS.pop(chat_id, None)
+        if session is None:
+            await update.message.reply_text("현재 진행 중인 선물 게임이 없습니다.")
+            return
+        # 관련 잡 모두 제거
+        for job in context.job_queue.jobs():
+            if job.name and job.name in (
+                f"futures_close:{chat_id}", f"futures_settle:{chat_id}",
+                f"futures_tick:{chat_id}", f"futures_settle_tick:{chat_id}",
+            ):
+                job.schedule_removal()
+        # 전원 환불
+        players = session.get("players", {})
+        if players:
+            db = get_firebase_client()
+            dt = now_kst()
+            for uid_str, info in players.items():
+                uid = int(uid_str)
+                async with get_user_lock(chat_id, uid):
+                    uref = user_ref(db, chat_id, uid)
+                    snap = uref.get()
+                    udata = snap.to_dict() if snap.exists else {}
+                    refund = int(udata.get("total_exp", 0)) + info["amount"]
+                    uref.set({"total_exp": refund, "last_seen": dt}, merge=True)
+        await update.message.reply_text("🛑 선물 게임이 강제 종료되었습니다. 모든 베팅금이 환불되었습니다.")
+        return
+
     if text.strip() == "!띱":
         if not _DDIP_ACTIVE.get(chat_id):
             return
