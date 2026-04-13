@@ -79,6 +79,69 @@ HORSE_2ND_REWARD = 300            # 2등 보상 ($WHAT)
 #             "taken_horses": set(), "message_id": int, "started_at": datetime}}
 _HORSE_SESSIONS: Dict[int, Dict[str, Any]] = {}
 
+# ─── 선물(Futures) 미니게임 상수 ───────────────────────────────
+FUTURES_BET_OPTIONS = [100, 300, 500, 1000]   # 베팅 금액 선택지
+FUTURES_JOIN_SECONDS = 180                     # 참여 가능 시간 (3분)
+FUTURES_SETTLE_SECONDS = 120                   # 마감 후 결과 판정까지 (2분)
+FUTURES_STALE_SECONDS = 360                    # 세션 자동 정리 시간
+FUTURES_BINANCE_SYMBOL = "BASEDUSDT"           # 바이낸스 심볼
+
+# 채팅방별 진행 중인 선물 세션
+# {chat_id: {"opener": int, "open_price": float, "players": {uid_str: {"side": "long"|"short", "amount": int, "display": str}},
+#             "started_at": datetime, "closed": bool, "message_id": int}}
+_FUTURES_SESSIONS: Dict[int, Dict[str, Any]] = {}
+
+
+def _fetch_binance_price(symbol: str = FUTURES_BINANCE_SYMBOL) -> Optional[float]:
+    """바이낸스에서 실시간 가격 조회"""
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            return float(data["price"])
+    except Exception as e:
+        print(f"[FUTURES] Binance price fetch error: {e}")
+        return None
+
+
+def _futures_session_status(session: Dict[str, Any], closed: bool = False) -> str:
+    players = session.get("players", {})
+    open_price = session.get("open_price", 0)
+    longs = [(uid, p) for uid, p in players.items() if p["side"] == "long"]
+    shorts = [(uid, p) for uid, p in players.items() if p["side"] == "short"]
+    lines = [
+        f"📈📉 $BASED 선물 게임!",
+        f"기준가: ${open_price:.6f}",
+        "",
+        f"🟢 롱 ({len(longs)}명):",
+    ]
+    for uid, p in longs:
+        lines.append(f"  {p['display']} — {p['amount']}$WHAT")
+    lines.append(f"🔴 숏 ({len(shorts)}명):")
+    for uid, p in shorts:
+        lines.append(f"  {p['display']} — {p['amount']}$WHAT")
+    if not closed:
+        lines.append("")
+        lines.append("⏳ 참여 가능! 아래 버튼을 눌러 롱/숏을 선택하세요.")
+    return "\n".join(lines)
+
+
+def _futures_pick_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    rows = []
+    for amount in FUTURES_BET_OPTIONS:
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🟢 롱 {amount}$WHAT",
+                callback_data=f"futures:{chat_id}:long:{amount}",
+            ),
+            InlineKeyboardButton(
+                text=f"🔴 숏 {amount}$WHAT",
+                callback_data=f"futures:{chat_id}:short:{amount}",
+            ),
+        ])
+    return InlineKeyboardMarkup(rows)
+
 # 멀티 메시지 경마 실황 템플릿 (각 템플릿은 메시지 리스트)
 # {horses}: 참가 말 목록, {h1}~{h6}: 순위별 말, {winner}: 우승마
 HORSE_RACE_TEMPLATES: List[List[str]] = [
@@ -315,6 +378,160 @@ async def _horse_race_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         print(f"[HORSE-TIMEOUT] _run_horse_race error: {e}")
         import traceback; traceback.print_exc()
+
+
+async def _futures_close_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """3분 후 참여 마감"""
+    data = context.job.data or {}
+    chat_id = int(data.get("chat_id", 0))
+    if not chat_id:
+        return
+    session = _FUTURES_SESSIONS.get(chat_id)
+    if session is None:
+        return
+    session["closed"] = True
+    players = session.get("players", {})
+    if not players:
+        _FUTURES_SESSIONS.pop(chat_id, None)
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="📈📉 선물 게임이 참가자 없이 종료되었습니다.",
+            )
+        except Exception:
+            pass
+        return
+    open_price = session.get("open_price", 0)
+    longs = [p for p in players.values() if p["side"] == "long"]
+    shorts = [p for p in players.values() if p["side"] == "short"]
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"🔒 선물 게임 참여가 마감되었습니다!\n"
+                f"기준가: ${open_price:.6f}\n"
+                f"🟢 롱: {len(longs)}명 | 🔴 숏: {len(shorts)}명\n\n"
+                f"⏳ 2분 후 결과가 발표됩니다..."
+            ),
+        )
+    except Exception:
+        pass
+    # 2분 후 결과 판정 스케줄
+    context.job_queue.run_once(
+        _futures_settle_job,
+        when=FUTURES_SETTLE_SECONDS,
+        data={"chat_id": chat_id},
+        name=f"futures_settle:{chat_id}",
+    )
+
+
+async def _futures_settle_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """마감 2분 후 결과 판정"""
+    data = context.job.data or {}
+    chat_id = int(data.get("chat_id", 0))
+    if not chat_id:
+        return
+    session = _FUTURES_SESSIONS.pop(chat_id, None)
+    if session is None:
+        return
+
+    open_price = session.get("open_price", 0)
+    players = session.get("players", {})
+    if not players:
+        return
+
+    # 현재 가격 조회
+    settle_price = _fetch_binance_price()
+    if settle_price is None:
+        # API 오류 시 전원 환불
+        db = get_firebase_client()
+        dt = now_kst()
+        for uid_str, info in players.items():
+            uid = int(uid_str)
+            async with get_user_lock(chat_id, uid):
+                uref = user_ref(db, chat_id, uid)
+                snap = uref.get()
+                udata = snap.to_dict() if snap.exists else {}
+                refund = int(udata.get("total_exp", 0)) + info["amount"]
+                uref.set({"total_exp": refund, "last_seen": dt}, merge=True)
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ 가격 조회 실패로 선물 게임이 취소됩니다. 베팅금이 환불되었습니다.",
+            )
+        except Exception:
+            pass
+        return
+
+    # 결과 판정
+    if settle_price > open_price:
+        winning_side = "long"
+        direction_text = "📈 가격 상승!"
+    elif settle_price < open_price:
+        winning_side = "short"
+        direction_text = "📉 가격 하락!"
+    else:
+        winning_side = "draw"
+        direction_text = "➡️ 가격 변동 없음!"
+
+    winners = []
+    losers = []
+    for uid_str, info in players.items():
+        if winning_side == "draw":
+            winners.append((uid_str, info))
+        elif info["side"] == winning_side:
+            winners.append((uid_str, info))
+        else:
+            losers.append((uid_str, info))
+
+    db = get_firebase_client()
+    dt = now_kst()
+    today = kst_date_str(dt)
+
+    # 승자에게 2배 지급
+    for uid_str, info in winners:
+        uid = int(uid_str)
+        reward = info["amount"] * 2 if winning_side != "draw" else info["amount"]
+        async with get_user_lock(chat_id, uid):
+            uref = user_ref(db, chat_id, uid)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            new_bal = int(udata.get("total_exp", 0)) + reward
+            uref.set({
+                "total_exp": new_bal,
+                "last_seen": dt,
+                "last_active_date": today,
+            }, merge=True)
+
+    # 결과 텍스트
+    change_pct = ((settle_price - open_price) / open_price * 100) if open_price else 0
+    lines = [
+        f"📊 선물 게임 결과!",
+        f"",
+        f"기준가: ${open_price:.6f}",
+        f"결과가: ${settle_price:.6f} ({change_pct:+.2f}%)",
+        f"{direction_text}",
+        f"",
+    ]
+    if winning_side == "draw":
+        lines.append("무승부! 전원 베팅금이 환불됩니다.")
+    else:
+        side_emoji = "🟢 롱" if winning_side == "long" else "🔴 숏"
+        lines.append(f"🏆 {side_emoji} 승리!")
+        lines.append("")
+        if winners:
+            lines.append("💰 수익자:")
+            for uid_str, info in winners:
+                lines.append(f"  {info['display']} +{info['amount']}$WHAT")
+        if losers:
+            lines.append("💸 손실자:")
+            for uid_str, info in losers:
+                lines.append(f"  {info['display']} -{info['amount']}$WHAT")
+
+    try:
+        await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+    except Exception:
+        pass
 
 
 def get_chat_lock(chat_id: int) -> asyncio.Lock:
@@ -1550,6 +1767,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _horse_race_timeout_job,
             when=HORSE_JOIN_TIMEOUT,
             name=f"horse_timeout:{chat_id}",
+            data={"chat_id": chat_id},
+        )
+        return
+
+    if text.strip() == "!선물":
+        if is_anonymous_admin_message(update):
+            await update.message.reply_text("익명 관리자 모드에서는 선물 게임에 참여할 수 없습니다.")
+            return
+
+        user_id = int(update.effective_user.id)
+        dt = now_kst()
+
+        if chat_id in _FUTURES_SESSIONS:
+            old = _FUTURES_SESSIONS[chat_id]
+            elapsed = (dt - old.get("started_at", dt)).total_seconds()
+            if elapsed < FUTURES_STALE_SECONDS:
+                await update.message.reply_text("이미 선물 게임이 진행 중입니다! 버튼을 눌러 참가하세요.")
+                return
+            _FUTURES_SESSIONS.pop(chat_id, None)
+            for job in context.job_queue.jobs():
+                if job.name and job.name in (f"futures_close:{chat_id}", f"futures_settle:{chat_id}"):
+                    job.schedule_removal()
+
+        # 바이낸스에서 현재 가격 조회
+        price = _fetch_binance_price()
+        if price is None:
+            await update.message.reply_text("⚠️ 바이낸스에서 $BASED 가격을 조회할 수 없습니다. 잠시 후 다시 시도해주세요.")
+            return
+
+        username = update.effective_user.username
+        display = f"@{username}" if username else (update.effective_user.full_name or str(user_id))
+
+        _FUTURES_SESSIONS[chat_id] = {
+            "opener": user_id,
+            "open_price": price,
+            "players": {},
+            "started_at": dt,
+            "closed": False,
+        }
+
+        kb = _futures_pick_keyboard(chat_id)
+        msg = await update.message.reply_text(
+            f"📈📉 $BASED 선물 게임 시작!\n\n"
+            f"개설자: {display}\n"
+            f"현재 $BASED 가격: ${price:.6f}\n\n"
+            f"🟢 롱 = 가격이 오를 것으로 예측\n"
+            f"🔴 숏 = 가격이 내릴 것으로 예측\n\n"
+            f"⏱ 3분 안에 참여하세요! (베팅금액 선택)\n"
+            f"마감 후 2분 뒤 실제 가격으로 결과 발표!\n"
+            f"맞추면 베팅금의 2배 지급, 틀리면 몰수!",
+            reply_markup=kb,
+        )
+        _FUTURES_SESSIONS[chat_id]["message_id"] = msg.message_id
+
+        context.job_queue.run_once(
+            _futures_close_job,
+            when=FUTURES_JOIN_SECONDS,
+            name=f"futures_close:{chat_id}",
             data={"chat_id": chat_id},
         )
         return
@@ -3525,7 +3800,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     q = update.callback_query
     data = (q.data or "").strip()
 
-    if not data.startswith("horse_pick:"):
+    if not data.startswith("horse_pick:") and not data.startswith("futures:"):
         try:
             await q.answer()
         except Exception:
@@ -4098,6 +4373,119 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await q.message.edit_text(status_text, reply_markup=kb)
             except Exception as e:
                 print(f"[HORSE] edit_text error: {e}")
+
+        return
+
+    if data.startswith("futures:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            try:
+                await q.answer()
+            except Exception:
+                pass
+            return
+        _, cid, side, amount_str = parts
+        if int(cid) != chat_id:
+            try:
+                await q.answer()
+            except Exception:
+                pass
+            return
+        if side not in ("long", "short"):
+            try:
+                await q.answer()
+            except Exception:
+                pass
+            return
+        try:
+            bet_amount = int(amount_str)
+        except ValueError:
+            try:
+                await q.answer()
+            except Exception:
+                pass
+            return
+        if bet_amount not in FUTURES_BET_OPTIONS:
+            try:
+                await q.answer()
+            except Exception:
+                pass
+            return
+
+        session = _FUTURES_SESSIONS.get(chat_id)
+        if session is None:
+            try:
+                await q.answer("현재 진행 중인 선물 게임이 없습니다.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        if session.get("closed"):
+            try:
+                await q.answer("참여가 마감되었습니다!", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        if q.from_user is None:
+            try:
+                await q.answer()
+            except Exception:
+                pass
+            return
+
+        user_id = int(q.from_user.id)
+        players = session.get("players", {})
+
+        if str(user_id) in players:
+            prev = players[str(user_id)]
+            side_kr = "롱" if prev["side"] == "long" else "숏"
+            try:
+                await q.answer(f"이미 {side_kr} {prev['amount']}$WHAT로 참가하셨습니다.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        # 잔고 확인 및 차감
+        db = get_firebase_client()
+        dt = now_kst()
+        today = kst_date_str(dt)
+        async with get_user_lock(chat_id, user_id):
+            uref = user_ref(db, chat_id, user_id)
+            snap = uref.get()
+            udata = snap.to_dict() if snap.exists else {}
+            bal = int(udata.get("total_exp", 0))
+            if bal < bet_amount:
+                try:
+                    await q.answer(f"잔고 부족! (필요 {bet_amount}, 보유 {bal}$WHAT)", show_alert=True)
+                except Exception:
+                    pass
+                return
+            uref.set({
+                "total_exp": bal - bet_amount,
+                "last_seen": dt,
+                "last_active_date": today,
+            }, merge=True)
+
+        username = q.from_user.username
+        display = f"@{username}" if username else (q.from_user.full_name or str(user_id))
+
+        players[str(user_id)] = {"side": side, "amount": bet_amount, "display": display}
+        session["players"] = players
+
+        side_kr = "🟢 롱" if side == "long" else "🔴 숏"
+        try:
+            await q.answer(f"{side_kr} {bet_amount}$WHAT 참가 완료!")
+        except Exception:
+            pass
+
+        # 메시지 업데이트
+        status_text = _futures_session_status(session)
+        kb = _futures_pick_keyboard(chat_id)
+        try:
+            await q.message.edit_text(status_text, reply_markup=kb)
+        except Exception:
+            pass
 
         return
 
