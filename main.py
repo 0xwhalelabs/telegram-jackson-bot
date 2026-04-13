@@ -108,7 +108,7 @@ def _fetch_binance_price(symbol: str = FUTURES_BINANCE_SYMBOL) -> Optional[float
     return None
 
 
-def _futures_session_status(session: Dict[str, Any], closed: bool = False) -> str:
+def _futures_session_status(session: Dict[str, Any], closed: bool = False, remain_sec: int = 0) -> str:
     players = session.get("players", {})
     open_price = session.get("open_price", 0)
     longs = [(uid, p) for uid, p in players.items() if p["side"] == "long"]
@@ -125,8 +125,10 @@ def _futures_session_status(session: Dict[str, Any], closed: bool = False) -> st
     for uid, p in shorts:
         lines.append(f"  {p['display']} — {p['amount']}$WHAT")
     if not closed:
+        mins = remain_sec // 60
+        secs = remain_sec % 60
         lines.append("")
-        lines.append("⏳ 참여 가능! 아래 버튼을 눌러 롱/숏을 선택하세요.")
+        lines.append(f"⏳ 참여 남은시간: {mins}분 {secs}초")
     return "\n".join(lines)
 
 
@@ -383,8 +385,37 @@ async def _horse_race_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         import traceback; traceback.print_exc()
 
 
-async def _futures_close_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """3분 후 참여 마감"""
+async def _futures_countdown_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """참여 중 30초마다 남은시간 업데이트"""
+    data = context.job.data or {}
+    chat_id = int(data.get("chat_id", 0))
+    if not chat_id:
+        return
+    session = _FUTURES_SESSIONS.get(chat_id)
+    if session is None or session.get("closed"):
+        return
+    started_at = session.get("started_at")
+    if started_at is None:
+        return
+    elapsed = (now_kst() - started_at).total_seconds()
+    remain = max(0, FUTURES_JOIN_SECONDS - int(elapsed))
+    if remain <= 0:
+        return
+    status_text = _futures_session_status(session, closed=False, remain_sec=remain)
+    kb = _futures_pick_keyboard(chat_id)
+    msg_id = session.get("message_id")
+    if msg_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=msg_id,
+                text=status_text, reply_markup=kb,
+            )
+        except Exception:
+            pass
+
+
+async def _futures_settle_countdown_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """마감 후 30초마다 결과 발표 남은시간 업데이트"""
     data = context.job.data or {}
     chat_id = int(data.get("chat_id", 0))
     if not chat_id:
@@ -392,7 +423,59 @@ async def _futures_close_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     session = _FUTURES_SESSIONS.get(chat_id)
     if session is None:
         return
+    closed_at = session.get("closed_at")
+    if closed_at is None:
+        return
+    elapsed = (now_kst() - closed_at).total_seconds()
+    remain = max(0, FUTURES_SETTLE_SECONDS - int(elapsed))
+    open_price = session.get("open_price", 0)
+    players = session.get("players", {})
+    longs = [p for p in players.values() if p["side"] == "long"]
+    shorts = [p for p in players.values() if p["side"] == "short"]
+    mins = remain // 60
+    secs = remain % 60
+    text = (
+        f"🔒 선물 게임 참여가 마감되었습니다!\n"
+        f"기준가: ${open_price:.6f}\n"
+        f"🟢 롱: {len(longs)}명 | 🔴 숏: {len(shorts)}명\n\n"
+        f"⏳ 결과 발표까지: {mins}분 {secs}초"
+    )
+    settle_msg_id = session.get("settle_message_id")
+    if settle_msg_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=settle_msg_id, text=text,
+            )
+        except Exception:
+            pass
+
+
+async def _futures_close_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """3분 후 참여 마감"""
+    data = context.job.data or {}
+    chat_id = int(data.get("chat_id", 0))
+    if not chat_id:
+        return
+    # 참여 카운트다운 잡 제거
+    for job in context.job_queue.jobs():
+        if job.name and job.name == f"futures_tick:{chat_id}":
+            job.schedule_removal()
+    session = _FUTURES_SESSIONS.get(chat_id)
+    if session is None:
+        return
     session["closed"] = True
+    session["closed_at"] = now_kst()
+    # 참여 메시지에서 버튼 제거 + 마감 표시
+    msg_id = session.get("message_id")
+    if msg_id:
+        status_text = _futures_session_status(session, closed=True)
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=msg_id,
+                text=status_text + "\n\n🔒 참여가 마감되었습니다!",
+            )
+        except Exception:
+            pass
     players = session.get("players", {})
     if not players:
         _FUTURES_SESSIONS.pop(chat_id, None)
@@ -408,17 +491,26 @@ async def _futures_close_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     longs = [p for p in players.values() if p["side"] == "long"]
     shorts = [p for p in players.values() if p["side"] == "short"]
     try:
-        await context.bot.send_message(
+        settle_msg = await context.bot.send_message(
             chat_id=chat_id,
             text=(
                 f"🔒 선물 게임 참여가 마감되었습니다!\n"
                 f"기준가: ${open_price:.6f}\n"
                 f"🟢 롱: {len(longs)}명 | 🔴 숏: {len(shorts)}명\n\n"
-                f"⏳ 2분 후 결과가 발표됩니다..."
+                f"⏳ 결과 발표까지: 2분 0초"
             ),
         )
+        session["settle_message_id"] = settle_msg.message_id
     except Exception:
         pass
+    # 결과 발표 카운트다운 잡 (30초 간격)
+    context.job_queue.run_repeating(
+        _futures_settle_countdown_job,
+        interval=30,
+        first=30,
+        data={"chat_id": chat_id},
+        name=f"futures_settle_tick:{chat_id}",
+    )
     # 2분 후 결과 판정 스케줄
     context.job_queue.run_once(
         _futures_settle_job,
@@ -434,6 +526,10 @@ async def _futures_settle_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = int(data.get("chat_id", 0))
     if not chat_id:
         return
+    # 결과 카운트다운 잡 제거
+    for job in context.job_queue.jobs():
+        if job.name and job.name == f"futures_settle_tick:{chat_id}":
+            job.schedule_removal()
     session = _FUTURES_SESSIONS.pop(chat_id, None)
     if session is None:
         return
@@ -1790,7 +1886,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 return
             _FUTURES_SESSIONS.pop(chat_id, None)
             for job in context.job_queue.jobs():
-                if job.name and job.name in (f"futures_close:{chat_id}", f"futures_settle:{chat_id}"):
+                if job.name and job.name in (f"futures_close:{chat_id}", f"futures_settle:{chat_id}", f"futures_tick:{chat_id}", f"futures_settle_tick:{chat_id}"):
                     job.schedule_removal()
 
         # 현재 가격 조회
@@ -1829,6 +1925,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             when=FUTURES_JOIN_SECONDS,
             name=f"futures_close:{chat_id}",
             data={"chat_id": chat_id},
+        )
+        # 참여 카운트다운 (30초 간격)
+        context.job_queue.run_repeating(
+            _futures_countdown_job,
+            interval=30,
+            first=30,
+            data={"chat_id": chat_id},
+            name=f"futures_tick:{chat_id}",
         )
         return
 
@@ -4482,8 +4586,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception:
             pass
 
-        # 메시지 업데이트
-        status_text = _futures_session_status(session)
+        # 메시지 업데이트 (남은시간 계산)
+        started_at = session.get("started_at")
+        if started_at:
+            elapsed = (now_kst() - started_at).total_seconds()
+            remain = max(0, FUTURES_JOIN_SECONDS - int(elapsed))
+        else:
+            remain = FUTURES_JOIN_SECONDS
+        status_text = _futures_session_status(session, remain_sec=remain)
         kb = _futures_pick_keyboard(chat_id)
         try:
             await q.message.edit_text(status_text, reply_markup=kb)
