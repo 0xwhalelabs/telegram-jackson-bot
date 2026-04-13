@@ -93,18 +93,30 @@ _FUTURES_SESSIONS: Dict[int, Dict[str, Any]] = {}
 
 
 def _fetch_binance_price(symbol: str = FUTURES_BINANCE_SYMBOL) -> Optional[float]:
-    """CoinGecko에서 $BASED 가격 조회"""
-    url = "https://api.coingecko.com/api/v3/simple/price?ids=based-one&vs_currencies=usd"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-            print(f"[FUTURES] CoinGecko response: {data}")
-            price = float(data.get("based-one", {}).get("usd", 0))
-            if price > 0:
-                return price
-    except Exception as e:
-        print(f"[FUTURES] CoinGecko error: {e}")
+    """실시간 $BASED 가격 조회 (Bybit → Binance Futures → MEXC → CoinGecko)"""
+    sources = [
+        ("bybit", f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}",
+         lambda d: float(d["result"]["list"][0]["lastPrice"])),
+        ("binance_futures", f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}",
+         lambda d: float(d["price"])),
+        ("mexc", f"https://api.mexc.com/api/v3/ticker/price?symbol={symbol}",
+         lambda d: float(d["price"])),
+        ("coingecko", "https://api.coingecko.com/api/v3/simple/price?ids=based-one&vs_currencies=usd",
+         lambda d: float(d.get("based-one", {}).get("usd", 0))),
+    ]
+    for name, url, parser in sources:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                price = parser(data)
+                if price and price > 0:
+                    print(f"[FUTURES] {name}: ${price}")
+                    return price
+        except Exception as e:
+            print(f"[FUTURES] {name} error: {e}")
+            continue
+    print("[FUTURES] All price sources failed")
     return None
 
 
